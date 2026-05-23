@@ -12,11 +12,11 @@ docker pull ghcr.io/hmbown/deepseek-tui:latest
 Run the published image with a Docker-managed data volume:
 
 ```bash
-docker volume create deepseek-tui-home
+docker volume create codewhale-tui-home
 
 docker run --rm -it \
   -e DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
-  -v deepseek-tui-home:/home/deepseek/.deepseek \
+  -v codewhale-tui-home:/home/deepseek/.deepseek \
   -v "$PWD:/workspace" \
   -w /workspace \
   ghcr.io/hmbown/deepseek-tui:latest
@@ -27,7 +27,7 @@ Use a pinned release tag for reproducible installs:
 ```bash
 docker run --rm -it \
   -e DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
-  -v deepseek-tui-home:/home/deepseek/.deepseek \
+  -v codewhale-tui-home:/home/deepseek/.deepseek \
   -v "$PWD:/workspace" \
   -w /workspace \
   ghcr.io/hmbown/deepseek-tui:vX.Y.Z
@@ -41,7 +41,7 @@ Replace `vX.Y.Z` with a tag from
 Build the image locally from a checkout:
 
 ```bash
-docker build -t deepseek-tui .
+docker build -t codewhale-tui .
 ```
 
 Then run it with the same Docker-managed data volume:
@@ -49,10 +49,10 @@ Then run it with the same Docker-managed data volume:
 ```bash
 docker run --rm -it \
   -e DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
-  -v deepseek-tui-home:/home/deepseek/.deepseek \
+  -v codewhale-tui-home:/home/deepseek/.deepseek \
   -v "$PWD:/workspace" \
   -w /workspace \
-  deepseek-tui
+  codewhale-tui
 ```
 
 Docker Hub publishing is not configured; GHCR is the supported prebuilt image
@@ -74,13 +74,13 @@ is the safest default because Docker creates it with ownership the container can
 write:
 
 ```bash
--v deepseek-tui-home:/home/deepseek/.deepseek
+-v codewhale-tui-home:/home/deepseek/.deepseek
 ```
 
 Without this mount the container starts fresh each time.
 
 If you bind-mount an existing host directory instead, the image runs as the
-non-root `deepseek` user with UID/GID `1000:1000`. The mounted directory must be
+non-root `codewhale` user with UID/GID `1000:1000`. The mounted directory must be
 writable by that user, or startup can fail while creating runtime directories
 under `.deepseek/tasks`. On Linux hosts, either use the named volume above or
 prepare the bind mount explicitly:
@@ -101,8 +101,8 @@ volume instead.
 
 ## Non-interactive / pipeline usage
 
-When stdin is not a TTY, `deepseek` drops to the dispatcher's one-shot mode
-(`deepseek -c "…"`). Pipe a prompt on stdin:
+When stdin is not a TTY, `codewhale` drops to the dispatcher's one-shot mode
+(`codewhale -c "…"`). Pipe a prompt on stdin:
 
 ```bash
 echo "Explain the Cargo.toml in structured English." | \
@@ -113,18 +113,18 @@ echo "Explain the Cargo.toml in structured English." | \
 
 ```bash
 # Single platform (your host architecture)
-docker build -t deepseek-tui .
+docker build -t codewhale-tui .
 
 # Multi-platform (requires a builder with emulation)
 docker buildx create --use
-docker buildx build --platform linux/amd64,linux/arm64 -t deepseek-tui .
+docker buildx build --platform linux/amd64,linux/arm64 -t codewhale-tui .
 ```
 
 ## Devcontainer
 
 The repository includes a [`.devcontainer/devcontainer.json`](../.devcontainer/devcontainer.json)
 configuration for VS Code / GitHub Codespaces. It pre-installs the Rust toolchain,
-rust-analyzer, and the `deepseek` binary. Open the repo in a devcontainer to get a
+rust-analyzer, and the `codewhale` binary. Open the repo in a devcontainer to get a
 ready-to-use development environment.
 
 ## Release status

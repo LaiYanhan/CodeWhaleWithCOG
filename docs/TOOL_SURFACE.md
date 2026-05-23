@@ -258,8 +258,8 @@ while the registry contract stays stable.
 Version smoke:
 
 ```bash
-deepseek --version
-deepseek-tui --version
+codewhale --version
+codewhale-tui --version
 ```
 
 Tool-surface smoke:

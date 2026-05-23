@@ -38,9 +38,9 @@ mirror carry them to CNB.
 When CNB receives a `v*` tag, the root `.cnb.yml` tag pipeline builds Linux x64
 release assets from source and publishes a CNB release with:
 
-- `deepseek-linux-x64`
-- `deepseek-tui-linux-x64`
-- `deepseek-artifacts-sha256.txt`
+- `codewhale-linux-x64`
+- `codewhale-tui-linux-x64`
+- `codewhale-artifacts-sha256.txt`
 
 This gives users who can reach CNB but not GitHub a CNB-native release path.
 GitHub remains the canonical full release matrix; the CNB tag pipeline is the
@@ -144,7 +144,7 @@ expired:
    ```
 4. Confirm the run succeeds via `gh run list --workflow=sync-cnb.yml`.
 
-## Binary release assets and `deepseek update`
+## Binary release assets and `codewhale update`
 
 CNB now builds Linux x64 assets for `v*` tags from the source-controlled
 `.cnb.yml` pipeline. GitHub remains the canonical full release matrix. Users
@@ -152,24 +152,24 @@ behind GitHub-blocking networks should use one of these paths:
 
 - **`cargo install`** from the CNB mirror:
   ```bash
-  cargo install --git https://cnb.cool/deepseek-tui.com/DeepSeek-TUI --tag vX.Y.Z deepseek-tui-cli
-  cargo install --git https://cnb.cool/deepseek-tui.com/DeepSeek-TUI --tag vX.Y.Z deepseek-tui
+  cargo install --git https://cnb.cool/deepseek-tui.com/DeepSeek-TUI --tag vX.Y.Z codewhale-cli
+  cargo install --git https://cnb.cool/deepseek-tui.com/DeepSeek-TUI --tag vX.Y.Z codewhale-tui
   ```
   (Both binaries are required — the dispatcher and the TUI ship
   separately; see `AGENTS.md` for the two-binary install rationale.)
 
 - **CNB release assets** for Linux x64, when the matching CNB tag pipeline has
-  completed successfully. Download `deepseek-linux-x64`,
-  `deepseek-tui-linux-x64`, and `deepseek-artifacts-sha256.txt` from the CNB
+  completed successfully. Download `codewhale-linux-x64`,
+  `codewhale-tui-linux-x64`, and `codewhale-artifacts-sha256.txt` from the CNB
   release for `vX.Y.Z`, then verify the binaries against the manifest.
 
 - **`DEEPSEEK_TUI_RELEASE_BASE_URL`** environment variable, if a
   CDN mirror of release assets exists. The npm
-  wrapper installer and `deepseek update` read this variable to redirect
-  binary downloads. For `deepseek update`, also set
+  wrapper installer and `codewhale update` read this variable to redirect
+  binary downloads. For `codewhale update`, also set
   `DEEPSEEK_TUI_VERSION=X.Y.Z` so the updater can label the mirrored
   release without contacting GitHub. The directory pointed to must contain
-  `deepseek-artifacts-sha256.txt` and the platform binaries; format matches
+  `codewhale-artifacts-sha256.txt` and the platform binaries; format matches
   a GitHub Release asset directory.
 
 ## Tencent Cloud remote-first path

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Project renamed to codewhale.** The canonical CLI dispatcher is now
+  `codewhale` (was `deepseek`) and the TUI runtime is `codewhale-tui`
+  (was `deepseek-tui`). The 14 workspace crates are renamed from
+  `deepseek-*` / `deepseek-tui-*` to `codewhale-*` / `codewhale-tui-*`.
+  The npm wrapper package is now `codewhale` (was `deepseek-tui`). See
+  [docs/REBRAND.md](https://github.com/Hmbown/DeepSeek-TUI/blob/main/docs/REBRAND.md)
+  for migration notes.
+- **DeepSeek provider integration is unchanged.** `DEEPSEEK_*` env vars,
+  model IDs (`deepseek-v4-pro`, `deepseek-v4-flash`, the legacy
+  `deepseek-chat` / `deepseek-reasoner` aliases), the
+  `https://api.deepseek.com` host, and the `~/.deepseek/` config
+  directory are all preserved.
+
+### Deprecated
+
+- The `deepseek` and `deepseek-tui` binary names continue to ship as
+  tiny shims that print a one-line warning and forward argv to the
+  renamed binaries. They will be removed in v0.9.0.
+- The `deepseek-tui` npm package continues to publish for one release
+  cycle as a no-`bin` deprecation shim whose postinstall directs users
+  to `npm install -g codewhale`. It will be removed in v0.9.0.
+
 ## [0.8.40] - 2026-05-21
 
 ### Added

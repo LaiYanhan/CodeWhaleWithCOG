@@ -27,7 +27,7 @@ labels: bug
 ## Environment
 
 - OS:
-- DeepSeek CLI version:
+- codewhale version:
 - Install method:
 - Model/provider:
 - Terminal app:
@@ -35,7 +35,7 @@ labels: bug
 
 <!-- Hints:
 OS: Windows 11 / Ubuntu 22.04 / macOS 14
-DeepSeek CLI version: run `deepseek --version`
+codewhale version: run `codewhale --version`
 Install method: cargo install / release binary / source build
 Model/provider: deepseek-v4-pro / DeepSeek, or qwen2.5-coder / Ollama
 Terminal app: iTerm2 / Windows Terminal / GNOME Terminal / VS Code terminal
