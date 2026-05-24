@@ -6538,15 +6538,9 @@ mod work_sidebar_projection_tests {
         // Byte 57 should be inside the em dash (3-byte UTF-8 sequence).
         assert!(!summary.is_char_boundary(57));
 
-        // The fix: floor_char_boundary steps back to the start of the char.
-        let byte_end = summary.floor_char_boundary(57);
-        assert!(summary.is_char_boundary(byte_end));
-        assert!(byte_end <= 57);
-        // Should have stepped back to byte 56 (end of ASCII prefix).
-        assert_eq!(byte_end, 56);
-
-        // The slice should not panic.
-        let truncated = &summary[..byte_end];
-        assert_eq!(truncated, prefix);
+        // The runtime helper should step back to the start of the char
+        // and append the ellipsis without panicking.
+        let truncated = crate::utils::truncate_with_ellipsis(&summary, 60, "…");
+        assert_eq!(truncated, format!("{prefix}…"));
     }
 }
