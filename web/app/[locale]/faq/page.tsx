@@ -23,7 +23,7 @@ const faqEn: FaqItem[] = [
     q: "What is CodeWhale?",
     a: (
       <>
-        CodeWhale is a terminal-native coding agent for open-source and open-weight models. It runs from the <code className="inline">codewhale</code> command, streams reasoning blocks, edits local workspaces with approval gates, and can auto-route each turn to the right model and thinking level. DeepSeek V4 is the first-class model path; OpenRouter is ready. Hugging Face, self-hosted, and other open-model surfaces are on the roadmap.
+        CodeWhale is a terminal-native coding agent for open-source and open-weight models. It runs from the <code className="inline">codewhale</code> command, streams reasoning blocks, edits local workspaces with approval gates, and can auto-route each turn to the right model and thinking level. DeepSeek V4 is the first-class model path; v0.8.45 also ships Moonshot/Kimi, OpenRouter, NVIDIA NIM, OpenAI-compatible, AtlasCloud, Wanjie Ark, Novita, Fireworks, SGLang, vLLM, and Ollama paths.
       </>
     ),
     sources: ["README.md", "docs/ARCHITECTURE.md"],
@@ -112,12 +112,13 @@ codewhale doctor         # full connectivity check`}
         <p className="mb-2">CodeWhale ships with these built-in providers:</p>
         <ul className="list-disc pl-5 space-y-1 text-sm text-ink-soft mb-3">
           <li><strong>DeepSeek</strong> — first-class, native API. Reasoning streaming, cache metrics, thinking effort control.</li>
+          <li><strong>Moonshot/Kimi</strong> — Kimi API key mode or local Kimi CLI OAuth reuse.</li>
           <li><strong>OpenRouter</strong> — unified API for DeepSeek models and more.</li>
-          <li><strong>OpenAI</strong>, <strong>NVIDIA NIM</strong>, <strong>Novita</strong>, <strong>Fireworks</strong>, <strong>sglang</strong>, <strong>vLLM</strong>, <strong>Ollama</strong></li>
+          <li><strong>OpenAI-compatible</strong>, <strong>NVIDIA NIM</strong>, <strong>AtlasCloud</strong>, <strong>Wanjie Ark</strong>, <strong>Novita</strong>, <strong>Fireworks</strong>, <strong>SGLang</strong>, <strong>vLLM</strong>, <strong>Ollama</strong></li>
         </ul>
         <p>
           Set the corresponding env var (e.g. <code className="inline">OPENROUTER_API_KEY</code>) and your provider in <code className="inline">~/.deepseek/config.toml</code>.
-          Hugging Face, ZenMux, and self-hosted OpenAI-compatible endpoints are on the roadmap.
+          SGLang, vLLM, and Ollama can also run against self-hosted OpenAI-compatible endpoints.
         </p>
       </>
     ),
@@ -156,7 +157,7 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
         Yes. Use the <code className="inline">vllm</code>, <code className="inline">sglang</code>, or <code className="inline">ollama</code> providers with your local endpoint.
         For OpenAI-compatible endpoints (llama.cpp server, text-generation-webui, Aphrodite, etc.), you can use the <code className="inline">openai</code> provider with a custom <code className="inline">base_url</code>.
         CodeWhale also respects <code className="inline">DEEPSEEK_ALLOW_INSECURE_HTTP=true</code> for local HTTP endpoints.
-        Full Hugging Face TGI/vLLM integration is on the roadmap.
+        Direct Hugging Face TGI discovery remains roadmap work.
       </>
     ),
     sources: ["#574", "#1303", "docs/CONFIGURATION.md"],
@@ -211,7 +212,7 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
     a: (
       <>
         CodeWhale runs entirely on your machine. No telemetry, no cloud processing of your code.
-        Sandbox backends: <strong>seatbelt</strong> (macOS), <strong>landlock</strong> (Linux), restricted tokens (Windows).
+        Sandbox backends: <strong>seatbelt</strong> (macOS), <strong>landlock</strong> (Linux). Windows keeps the same approval and terminal runtime protections, but does not advertise OS-level filesystem isolation yet.
         Workspace boundaries default to <code className="inline">--workspace</code>. <code className="inline">/trust</code> lifts them.
         Approval mode is configurable per session. All credential/approval/elevation events are written to <code className="inline">~/.deepseek/audit.log</code>.
       </>
@@ -336,7 +337,7 @@ const faqZh: FaqItem[] = [
     q: "CodeWhale 是什么？",
     a: (
       <>
-        CodeWhale 是一个面向开源模型的终端原生编程智能体。通过 <code className="inline">codewhale</code> 命令启动，流式输出推理块，在有审批门槛的情况下编辑本地工作区，并可为每个回合自动选择最合适的模型和推理深度。DeepSeek V4 是一级模型路径；OpenRouter 已就绪。Hugging Face、自托管等开放模型接口已在路线图中。
+        CodeWhale 是一个面向开源模型的终端原生编程智能体。通过 <code className="inline">codewhale</code> 命令启动，流式输出推理块，在有审批门槛的情况下编辑本地工作区，并可为每个回合自动选择最合适的模型和推理深度。DeepSeek V4 是一级模型路径；v0.8.45 也内置 Moonshot/Kimi、OpenRouter、NVIDIA NIM、OpenAI 兼容、AtlasCloud、Wanjie Ark、Novita、Fireworks、SGLang、vLLM 和 Ollama 路径。
       </>
     ),
     sources: ["README.md", "docs/ARCHITECTURE.md"],
@@ -424,12 +425,13 @@ codewhale doctor         # 完整连接检查`}
         <p className="mb-2">CodeWhale 内建以下提供商：</p>
         <ul className="list-disc pl-5 space-y-1 text-sm text-ink-soft mb-3">
           <li><strong>DeepSeek</strong> — 一级支持，原生 API。推理流、缓存指标、思考力度控制。</li>
+          <li><strong>Moonshot/Kimi</strong> — Kimi API key 模式或复用本地 Kimi CLI OAuth。</li>
           <li><strong>OpenRouter</strong> — 统一 API，可访问 DeepSeek 等模型。</li>
-          <li><strong>OpenAI</strong>、<strong>NVIDIA NIM</strong>、<strong>Novita</strong>、<strong>Fireworks</strong>、<strong>sglang</strong>、<strong>vLLM</strong>、<strong>Ollama</strong></li>
+          <li><strong>OpenAI 兼容</strong>、<strong>NVIDIA NIM</strong>、<strong>AtlasCloud</strong>、<strong>Wanjie Ark</strong>、<strong>Novita</strong>、<strong>Fireworks</strong>、<strong>SGLang</strong>、<strong>vLLM</strong>、<strong>Ollama</strong></li>
         </ul>
         <p>
           设置对应的环境变量（如 <code className="inline">OPENROUTER_API_KEY</code>）并在 <code className="inline">~/.deepseek/config.toml</code> 中配置你的提供商。
-          Hugging Face、ZenMux 和自托管 OpenAI 兼容端点正在路线图中。
+          SGLang、vLLM 和 Ollama 也可以连接自托管 OpenAI 兼容端点。
         </p>
       </>
     ),
@@ -468,7 +470,7 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
         可以。使用 <code className="inline">vllm</code>、<code className="inline">sglang</code> 或 <code className="inline">ollama</code> 提供商连接本地端点。
         对于 OpenAI 兼容端点（llama.cpp server、text-generation-webui 等），可以使用 <code className="inline">openai</code> 提供商并设置自定义 <code className="inline">base_url</code>。
         CodeWhale 也支持 <code className="inline">DEEPSEEK_ALLOW_INSECURE_HTTP=true</code> 用于本地 HTTP 端点。
-        完整的 Hugging Face TGI/vLLM 集成正在路线图中。
+        Hugging Face TGI 的直接发现仍在路线图中。
       </>
     ),
     sources: ["#574", "#1303", "docs/CONFIGURATION.md"],
@@ -523,7 +525,7 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
     a: (
       <>
         CodeWhale 完全在你的机器上运行。无遥测，不会将你的代码上传到云端处理。
-        沙箱后端：<strong>seatbelt</strong>（macOS）、<strong>landlock</strong>（Linux）、受限令牌（Windows）。
+        沙箱后端：<strong>seatbelt</strong>（macOS）、<strong>landlock</strong>（Linux）。Windows 保留同样的审批与终端运行时保护，但当前不宣称 OS 级文件系统沙箱。
         工作区边界默认为 <code className="inline">--workspace</code>。<code className="inline">/trust</code> 可解除边界。
         审批模式可按会话配置。所有凭证/审批/提权事件写入 <code className="inline">~/.deepseek/audit.log</code>。
       </>

@@ -15,7 +15,7 @@ const FALLBACK_STATS: RepoStats = {
   forks: 0,
   openIssues: 0,
   openPulls: 0,
-  contributors: 98,
+  contributors: 99,
   fetchedAt: new Date().toISOString(),
 };
 
@@ -94,8 +94,8 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <p className="mt-6 text-lg text-ink-soft leading-relaxed max-w-2xl">
               <span className="font-cjk text-indigo font-semibold">CodeWhale</span>
               {isZh
-                ? " 是面向 DeepSeek V4 及其他开放权重模型的终端原生编程智能体。它读改文件、跑测试、调用 MCP 服务器，全程在你的文件系统沙箱内运行。"
-                : " is a terminal-native coding agent for DeepSeek V4 and other open-weight models. It reads and edits files, runs tests, calls MCP servers — all inside your filesystem sandbox."}
+                ? " 是面向 DeepSeek V4 及其他开放权重模型的终端原生编程智能体。它读改文件、跑测试、调用 MCP 服务器，并通过审批、工作区边界和平台沙箱控制风险。"
+                : " is a terminal-native coding agent for DeepSeek V4 and other open-weight models. It reads and edits files, runs tests, calls MCP servers, and controls risk through approvals, workspace boundaries, and platform sandboxes."}
             </p>
 
             <div className="mt-8 flex flex-wrap items-stretch sm:items-center gap-3">
@@ -155,7 +155,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 )}
               </pre>
               <div className="mt-3 flex items-center justify-between text-[0.7rem] font-mono text-ink-mute">
-                <span>{isZh ? "需要 Node 或 Rust 1.88+" : "needs Node or Rust 1.88+"}</span>
+                <span>{isZh ? "Linux / macOS / Windows x64" : "Linux / macOS / Windows x64"}</span>
                 <Link href={isZh ? "/zh/install" : "/install"} className="text-indigo hover:underline">{isZh ? "其他方式 →" : "other ways →"}</Link>
               </div>
             </div>
@@ -188,14 +188,14 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 <div className="eyebrow mb-3">02 · 开源模型优先</div>
                 <h3 className="font-display text-xl mb-3">DeepSeek V4 深度集成</h3>
                 <p className="text-sm text-ink-soft leading-[1.9]">
-                  原生 DeepSeek API：推理流、缓存指标、思考力度控制。OpenRouter、NVIDIA NIM、vLLM、sglang 同时可选。
+                  原生 DeepSeek API：推理流、缓存指标、思考力度控制。Moonshot/Kimi、OpenRouter、NVIDIA NIM、vLLM、SGLang 等同时可选。
                 </p>
               </div>
               <div className="p-6">
                 <div className="eyebrow mb-3">03 · 沙箱边界</div>
                 <h3 className="font-display text-xl mb-3">Plan、Agent、YOLO</h3>
                 <p className="text-sm text-ink-soft leading-[1.9]">
-                  Plan 只读；Agent 风险操作前确认；YOLO 全自动。沙箱：seatbelt（macOS）、landlock（Linux）、受限令牌（Windows）。
+                  Plan 只读；Agent 风险操作前确认；YOLO 全自动。macOS 使用 seatbelt，Linux 使用 landlock；Windows 保留同样的审批与终端保护。
                 </p>
               </div>
             </>
@@ -212,14 +212,14 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 <div className="eyebrow mb-3">02 · open models first</div>
                 <h3 className="font-display text-xl mb-3">DeepSeek V4, deeply integrated</h3>
                 <p className="text-sm text-ink-soft leading-relaxed">
-                  Native DeepSeek API: reasoning streaming, cache metrics, thinking-effort control. OpenRouter, NVIDIA NIM, vLLM, and sglang also supported.
+                  Native DeepSeek API: reasoning streaming, cache metrics, thinking-effort control. Moonshot/Kimi, OpenRouter, NVIDIA NIM, vLLM, and SGLang are also supported.
                 </p>
               </div>
               <div className="p-6">
-                <div className="eyebrow mb-3">03 · sandboxed</div>
+                <div className="eyebrow mb-3">03 · controlled</div>
                 <h3 className="font-display text-xl mb-3">Plan, Agent, YOLO</h3>
                 <p className="text-sm text-ink-soft leading-relaxed">
-                  Plan reads only. Agent asks before risky ops. YOLO auto-approves. Sandboxed via seatbelt (macOS), landlock (Linux), restricted tokens (Windows).
+                  Plan reads only. Agent asks before risky ops. YOLO auto-approves. macOS uses seatbelt, Linux uses landlock; Windows keeps the same approval and terminal protections.
                 </p>
               </div>
             </>
@@ -325,7 +325,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
     B -->|tool call| T["read_file · edit_file · grep<br/>apply_patch · exec_shell<br/>mcp_&lt;server&gt;_&lt;tool&gt;"]
     T -->|approval Y/N| P["审批对话框<br/>approval dialog"]
     P --> B
-    T -->|exec| S["沙箱<br/>seatbelt · landlock · win32"]
+    T -->|exec| S["平台控制<br/>seatbelt · landlock · approvals"]
     classDef accent fill:#e9eefe,stroke:#0e0e10,stroke-width:1px;
     classDef api fill:#0e0e10,stroke:#0e0e10,color:#ffffff;
     class C api;
@@ -337,7 +337,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
     B -->|tool call| T["read_file · edit_file · grep<br/>apply_patch · exec_shell<br/>mcp_&lt;server&gt;_&lt;tool&gt;"]
     T -->|approval Y/N| P["Approval<br/>dialog"]
     P --> B
-    T -->|exec| S["Sandbox<br/>seatbelt · landlock · win32"]
+    T -->|exec| S["Platform controls<br/>seatbelt · landlock · approvals"]
     classDef accent fill:#e9eefe,stroke:#0e0e10,stroke-width:1px;
     classDef api fill:#0e0e10,stroke:#0e0e10,color:#ffffff;
     class C api;
