@@ -68,6 +68,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CVE-2026-8723 in feishu-bridge.** Bumped `qs` to `>=6.15.2` in the
   Feishu bridge integration (#2198).
 
+### Community
+
+Thanks to new contributors whose PRs landed in this release:
+**@donglovejava** (#2154, #2163, #2166, #2167, #2168),
+**@encyc** (#2152),
+**@saieswar237** (#2178),
+**@sximelon** (#2174),
+**@nanookclaw** (#2135),
+**@Sskift** (#2119),
+**@xin1104** (#2105),
+**@mrluanma** (#2059),
+**@Lellansin** (#2055),
+**@zhuangbiaowei** (#2145),
+**@aboimpinto** (#1872),
+and continuing contributors **@reidliu41**, **@cyq1017**, **@idling11**,
+**@h3c-hexin**, **@wdw8276**, and **@zlh124**.
+
 ## [0.8.45] - 2026-05-25
 
 ### Added
