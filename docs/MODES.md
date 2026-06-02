@@ -28,7 +28,7 @@ Run `/mode` to open the mode picker, or switch directly with `/mode agent`,
 |:---|:---:|:---:|:---:|
 | Read-only file, search, and diagnostic tools | yes | yes | yes |
 | File write and patch tools | no | yes | yes |
-| Shell tools (`exec_shell`, `task_shell_start`, waits, interact, cancel) | no | yes, when `allow_shell = true` | yes |
+| Shell tools (`exec_shell`, `task_shell_start`, waits, interact, cancel) | no | approval-gated, when `allow_shell = true` | yes |
 | Paid or external-service tools | approval-gated | approval-gated | auto-approved |
 | Access outside the workspace root | no | only with trust mode | yes |
 
