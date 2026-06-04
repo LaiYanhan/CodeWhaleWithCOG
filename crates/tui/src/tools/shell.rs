@@ -2755,6 +2755,11 @@ impl ToolSpec for ShellWaitTool {
         self.name
     }
 
+    fn model_visible(&self) -> bool {
+        // `exec_wait` is a legacy alias; only `exec_shell_wait` is model-visible.
+        self.name == "exec_shell_wait"
+    }
+
     fn description(&self) -> &'static str {
         "Wait for a background shell task and return incremental output. Turn cancellation stops waiting but leaves the background task running."
     }
@@ -2834,6 +2839,11 @@ impl ToolSpec for ShellWaitTool {
 impl ToolSpec for ShellInteractTool {
     fn name(&self) -> &'static str {
         self.name
+    }
+
+    fn model_visible(&self) -> bool {
+        // `exec_interact` is a legacy alias; only `exec_shell_interact` is model-visible.
+        self.name == "exec_shell_interact"
     }
 
     fn description(&self) -> &'static str {

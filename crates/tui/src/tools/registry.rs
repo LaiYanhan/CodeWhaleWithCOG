@@ -1670,4 +1670,42 @@ mod tests {
             "task_shell_wait should be included when allow_shell is true"
         );
     }
+
+    /// #2683 — `exec_wait` and `exec_interact` are legacy aliases for
+    /// `exec_shell_wait` and `exec_shell_interact`. They must remain
+    /// callable (for saved transcript replay) but hidden from the
+    /// model-facing catalog.
+    #[test]
+    fn shell_alias_tools_hidden_from_model_catalog() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let registry = ToolRegistryBuilder::new().with_shell_tools().build(ctx);
+
+        // Legacy aliases stay callable.
+        for alias in ["exec_wait", "exec_interact"] {
+            assert!(registry.contains(alias), "{alias} should remain callable");
+        }
+
+        let api_names: Vec<String> = registry
+            .to_api_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+
+        // Canonical names are model-visible.
+        for canonical in ["exec_shell_wait", "exec_shell_interact"] {
+            assert!(
+                api_names.iter().any(|n| n == canonical),
+                "{canonical} should be model-visible"
+            );
+        }
+
+        // Legacy aliases are hidden.
+        for alias in ["exec_wait", "exec_interact"] {
+            assert!(
+                api_names.iter().all(|n| n != alias),
+                "{alias} should be hidden from the model catalog"
+            );
+        }
+    }
 }

@@ -2658,3 +2658,50 @@ fn subagent_completion_payload_carries_existing_sentinel_format() {
         "sentinel should not duplicate the human summary line"
     );
 }
+
+/// #2683 — Verify the model-facing tool catalog only advertises canonical
+/// subagent tools and never exposes legacy superseded names.
+#[test]
+fn model_catalog_only_advertises_canonical_subagent_tools() {
+    use crate::tools::ToolRegistryBuilder;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let runtime = stub_runtime();
+    let manager = runtime.manager.clone();
+    let ctx = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new()
+        .with_subagent_tools(manager, runtime)
+        .build(ctx);
+
+    let api_names: Vec<String> = registry
+        .to_api_tools()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+
+    // Canonical tools must be model-visible.
+    for canonical in ["agent_open", "agent_eval", "agent_close", "tool_agent"] {
+        assert!(
+            api_names.iter().any(|n| n == canonical),
+            "{canonical} should be in the model-facing catalog"
+        );
+    }
+
+    // Legacy/superseded names must NOT appear in the model catalog.
+    for legacy in [
+        "agent_spawn",
+        "agent_result",
+        "agent_cancel",
+        "resume_agent",
+        "agent_list",
+        "agent_send_input",
+        "agent_assign",
+        "agent_wait",
+        "delegate_to_agent",
+    ] {
+        assert!(
+            api_names.iter().all(|n| n != legacy),
+            "{legacy} should be hidden from the model-facing catalog"
+        );
+    }
+}
