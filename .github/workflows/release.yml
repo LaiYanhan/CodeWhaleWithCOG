@@ -454,7 +454,7 @@ jobs:
 
   release:
     needs: [build, bundle, windows-installer, docker, resolve]
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.bundle.result == 'success' && needs.windows-installer.result == 'success' && needs.docker.result == 'success' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.bundle.result == 'success' && needs.windows-installer.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
