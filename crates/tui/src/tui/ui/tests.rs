@@ -5608,6 +5608,7 @@ fn active_rlm_task_entries_surface_foreground_rlm_work() {
     assert_eq!(entries[0].id, "rlm-1");
     assert_eq!(entries[0].status, "running");
     assert_eq!(entries[0].prompt_summary, "RLM: file_path: Cargo.lock");
+    assert_eq!(entries[0].kind, TaskPanelEntryKind::Background);
     assert!(entries[0].duration_ms.unwrap_or_default() >= 3000);
 }
 
@@ -5628,6 +5629,7 @@ fn active_reasoning_task_entries_surface_reasoning_only_turns() {
     assert_eq!(entries[0].id, "reasoning-1");
     assert_eq!(entries[0].status, "running");
     assert_eq!(entries[0].prompt_summary, "model reasoning");
+    assert_eq!(entries[0].kind, TaskPanelEntryKind::ModelReasoning);
     assert!(entries[0].duration_ms.unwrap_or_default() >= 2000);
 }
 
@@ -9298,6 +9300,7 @@ mod work_sidebar_projection_tests {
             status: "completed".to_string(),
             prompt_summary: "echo hello".to_string(),
             duration_ms: Some(100),
+            kind: crate::tui::app::TaskPanelEntryKind::Background,
         };
         assert_eq!(entry.status, "completed");
         assert_ne!(entry.status, "running");

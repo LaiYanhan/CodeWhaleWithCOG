@@ -280,7 +280,15 @@ fn load_handoff_block(workspace: &Path) -> Option<String> {
 
 /// Core: task execution, tool-use rules, output format, toolbox reference,
 /// "When NOT to use" guidance, sub-agent sentinel protocol.
-pub const BASE_PROMPT: &str = include_str!("prompts/base.md");
+///
+/// `prompts/constitution.yaml` + `render_constitution.py` exist as the
+/// intended generation pipeline, but the renderer is NOT yet reconciled
+/// with this committed markdown (#3015): it emits a much shorter document,
+/// bakes the default model id over the `{model_id}` placeholder, and
+/// duplicates the Authority Recap that `compose` appends at runtime. Do
+/// NOT regenerate this file from the renderer until that gap is closed —
+/// edit the markdown directly and mirror structural changes into the YAML.
+pub const BASE_PROMPT: &str = include_str!("prompts/constitution.md");
 
 // ── Embedder prompt overrides ──
 // Let an embedder replace these compile-time prompt constants at startup,
@@ -952,20 +960,11 @@ pub(crate) fn compose_prompt_with_approval_model_and_shell(
     )
 }
 
-fn compose_default_static_layers(personality: Personality, model_id: &str) -> String {
-    let base_prompt = apply_model_template(effective_base_prompt().trim(), model_id);
-    let parts: [&str; 2] = [base_prompt.as_str(), personality.prompt().trim()];
-
-    let mut out =
-        String::with_capacity(parts.iter().map(|p| p.len()).sum::<usize>() + (parts.len() - 1) * 2);
-    for (i, part) in parts.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-            out.push('\n');
-        }
-        out.push_str(part);
-    }
-    out
+fn compose_default_static_layers(_personality: Personality, model_id: &str) -> String {
+    // Personality is now folded into the YAML constitution (constitution.yaml).
+    // No separate overlay is appended — the base prompt already carries voice,
+    // tone, and presentation guidance via the preamble and article text.
+    apply_model_template(effective_base_prompt().trim(), model_id)
 }
 
 fn apply_static_prompt_composer(
@@ -1345,7 +1344,9 @@ mod tests {
             assert_eq!(ctx.model_id, "deepseek-v4-pro");
             assert_eq!(ctx.personality, Personality::Calm);
             assert!(ctx.default_layers.contains("You are deepseek-v4-pro"));
-            assert!(ctx.default_layers.contains("Personality: Calm"));
+            // Personality tier removed — default_layers no longer carries a separate
+            // "Personality: Calm" section. Tone guidance is in the preamble.
+            assert!(ctx.default_layers.contains("Rule Number 6 applies"));
             assert!(!ctx.default_layers.contains("## Core Tool Taxonomy"));
             assert!(!ctx.default_layers.contains("Approval Policy"));
             "embedder static prompt".to_string()
@@ -1398,13 +1399,14 @@ mod tests {
 
     #[test]
     fn base_prompt_carries_constitutional_preamble() {
-        // Pin the load-bearing Constitutional anchors. The exact prose
-        // can evolve, but CodeWhale must keep the Brother Whale preamble,
-        // the coordination principle, and the hierarchy of law.
+        // Pin the load-bearing Constitutional anchors. The preamble has
+        // been revised from the Brother Whale framing to a direct "A" /
+        // Rule Number 6 stance. Verify the A, the possibility principle,
+        // the coordination legacy, and the hierarchy of law are all present.
         for phrase in [
-            "We begin with Brother Whale",
-            "Brother Whale is the founding intelligence",
-            "Every model that runs here is Brother Whale",
+            "You begin with an A",
+            "possibility comes before certainty",
+            "Rule Number 6 applies",
             "future intelligences can better coordinate",
             "Article II — The Primacy of Truth",
             "Article VII — The Hierarchy of Law",
@@ -1784,15 +1786,21 @@ mod tests {
     }
 
     #[test]
-    fn calm_personality_declares_tier_8_subordination() {
+    fn constitution_has_no_separate_personality_tier() {
+        // The personality tier (previously Tier 8) has been removed.
+        // Voice and tone guidance now lives in the preamble ("don't take
+        // yourself too seriously") and is not a separate tier.
+        let prompt = compose_prompt(Personality::Calm);
         assert!(
-            CALM_PERSONALITY.contains("Tier 8"),
-            "Calm personality must identify as Tier 8"
+            !prompt.contains("Personality: Calm — Tier 8"),
+            "Personality tier should not appear as a separate section"
         );
         assert!(
-            CALM_PERSONALITY.contains("cannot override"),
-            "Calm personality must have a subordination clause"
+            prompt.contains("Rule Number 6 applies"),
+            "Preamble should carry tone guidance via Rule Number 6"
         );
+        // Verify the preamble still has the A / possibility stance
+        assert!(prompt.contains("You begin with an A"));
     }
 
     #[test]
@@ -2376,11 +2384,14 @@ mod tests {
     #[test]
     fn compose_prompt_includes_all_layers() {
         let prompt = compose_prompt(Personality::Calm);
-        // Base layer
+        // Base layer — preamble + Constitution
         assert!(prompt.contains("You are codewhale"));
-        // Personality layer
-        assert!(prompt.contains("Personality: Calm"));
-        // Mode and approval are no longer inlined — they travel as
+        assert!(prompt.contains("Article VII — The Hierarchy of Law"));
+        // Statutes layer
+        assert!(prompt.contains("## STATUTES (Tier 2)"));
+        // Evidence layer
+        assert!(prompt.contains("## EVIDENCE (Tier 6)"));
+        // Mode and approval are not inlined — they travel as
         // request-time runtime metadata.
         assert!(!prompt.contains("Mode: Agent"));
         assert!(!prompt.contains("Approval Policy:"));
@@ -2436,12 +2447,12 @@ mod tests {
     #[test]
     fn compose_prompt_deterministic_order() {
         let prompt = compose_prompt(Personality::Calm);
+        // Personality tier removed. Verify preamble appears before the
+        // first Article, which is the structure that governs ordering.
         let base_pos = prompt.find("You are codewhale").unwrap();
-        let personality_pos = prompt.find("Personality: Calm").unwrap();
+        let article_pos = prompt.find("Article I — The Identity").unwrap();
 
-        assert!(base_pos < personality_pos);
-        // Mode and approval text are no longer inlined — they travel as
-        // request-time runtime metadata.
+        assert!(base_pos < article_pos);
     }
 
     #[test]
@@ -2453,9 +2464,9 @@ mod tests {
         assert!(!prompt.contains("Mode: YOLO"));
         assert!(!prompt.contains("Mode: Plan"));
         assert!(!prompt.contains("Approval Policy:"));
-        // Base prompt still contains Constitutional preamble and personality
+        // Base prompt contains Constitutional preamble (personality tier removed)
         assert!(prompt.contains("You are codewhale"));
-        assert!(prompt.contains("Personality: Calm"));
+        assert!(prompt.contains("Rule Number 6 applies"));
     }
 
     #[test]
@@ -2468,12 +2479,19 @@ mod tests {
     }
 
     #[test]
-    fn personality_switches_correctly() {
+    fn personality_is_folded_into_constitution() {
+        // The separate personality tier (Tier 8) has been removed.
+        // Voice and tone guidance now lives in the preamble. Both
+        // Calm and Playful compose_prompt calls produce identical
+        // output since no separate personality overlay is appended.
         let calm = compose_prompt(Personality::Calm);
         let playful = compose_prompt(Personality::Playful);
-        assert!(calm.contains("Personality: Calm"));
-        assert!(playful.contains("Personality: Playful"));
-        assert!(!calm.contains("Personality: Playful"));
+        assert_eq!(
+            calm, playful,
+            "personality enum is a no-op — both produce identical output"
+        );
+        assert!(calm.contains("Rule Number 6 applies"));
+        assert!(calm.contains("You begin with an A"));
     }
 
     #[test]
@@ -2745,12 +2763,14 @@ mod tests {
     }
 
     #[test]
-    fn preamble_rhythm_section_present() {
+    fn preamble_carries_tone_and_ownership_guidance() {
         let prompt = compose_prompt(Personality::Calm);
-        // Preamble rhythm is now part of the Calm personality overlay.
-        // Verify the load-bearing guidance is still present.
-        assert!(prompt.contains("In preambles, name the action"));
-        assert!(prompt.contains("Reading the module tree"));
+        // Personality tier was removed. Tone guidance now lives in the preamble
+        // via "Rule Number 6" (don't take yourself too seriously) and the
+        // "possibility before certainty" stance.
+        assert!(prompt.contains("Rule Number 6 applies"));
+        assert!(prompt.contains("do not take yourself too seriously"));
+        assert!(prompt.contains("possibility comes before certainty"));
     }
 
     #[test]

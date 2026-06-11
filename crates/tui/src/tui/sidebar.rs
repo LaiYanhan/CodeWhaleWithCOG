@@ -26,6 +26,7 @@ use crate::tools::todo::TodoStatus;
 
 use super::app::{
     App, SidebarFocus, SidebarHoverRow, SidebarHoverSection, SidebarHoverState, TaskPanelEntry,
+    TaskPanelEntryKind,
 };
 use super::history::{GenericToolCell, HistoryCell, ToolCell, ToolStatus, summarize_tool_output};
 use super::subagent_routing::active_fanout_counts;
@@ -828,6 +829,12 @@ fn task_panel_rows(
         push_tool_rows(&mut lines, &active_rows, content_width, max_rows, theme);
     }
 
+    let reasoning_rows = reasoning_task_rows(app);
+    if !reasoning_rows.is_empty() && lines.len() < max_rows {
+        push_sidebar_label_theme(&mut lines, "Model reasoning", theme);
+        push_reasoning_rows(&mut lines, &reasoning_rows, content_width, max_rows, theme);
+    }
+
     let background_rows = background_task_rows(app, &active_rows);
     // Lines pushed so far (turn label, Live tools header, live tool rows)
     // are not clickable — backfill their action slots.
@@ -922,6 +929,7 @@ fn task_panel_rows(
         || (lines.len() == 1
             && app.runtime_turn_id.is_some()
             && active_rows.is_empty()
+            && reasoning_rows.is_empty()
             && background_rows.is_empty())
     {
         lines.push(Line::from(Span::styled(
@@ -948,6 +956,12 @@ fn task_panel_hover_texts(app: &App, max_rows: usize) -> Vec<String> {
     if !active_rows.is_empty() && texts.len() < max_rows {
         texts.push("Live tools".to_string());
         push_tool_row_hover_texts(&mut texts, &active_rows, max_rows);
+    }
+
+    let reasoning_rows = reasoning_task_rows(app);
+    if !reasoning_rows.is_empty() && texts.len() < max_rows {
+        texts.push("Model reasoning".to_string());
+        push_reasoning_row_hover_texts(&mut texts, &reasoning_rows, max_rows);
     }
 
     let background_rows = background_task_rows(app, &active_rows);
@@ -1008,6 +1022,7 @@ fn task_panel_hover_texts(app: &App, max_rows: usize) -> Vec<String> {
         || (texts.len() == 1
             && app.runtime_turn_id.is_some()
             && active_rows.is_empty()
+            && reasoning_rows.is_empty()
             && background_rows.is_empty())
     {
         texts.push("No live tools or background jobs".to_string());
@@ -1037,6 +1052,69 @@ fn push_tool_row_hover_texts(texts: &mut Vec<String>, rows: &[SidebarToolRow], m
         texts.push(label);
         if !row.summary.trim().is_empty() && texts.len() < max_rows {
             texts.push(format!("  {}", row.summary));
+        }
+    }
+}
+
+fn push_reasoning_rows(
+    lines: &mut Vec<Line<'static>>,
+    rows: &[TaskPanelEntry],
+    content_width: usize,
+    max_rows: usize,
+    theme: &palette::UiTheme,
+) {
+    for task in rows {
+        if lines.len() >= max_rows {
+            break;
+        }
+        let color = match task.status.as_str() {
+            "running" => theme.warning,
+            "completed" => theme.success,
+            "failed" => theme.error_fg,
+            _ => theme.text_muted,
+        };
+        let duration = task
+            .duration_ms
+            .map(format_duration_ms)
+            .unwrap_or_else(|| "-".to_string());
+        lines.push(Line::from(Span::styled(
+            truncate_line_to_width(
+                &format!("thinking {} {duration}", task.status),
+                content_width,
+            ),
+            Style::default().fg(color),
+        )));
+        if !task.prompt_summary.trim().is_empty() && lines.len() < max_rows {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {}",
+                    truncate_line_to_width(
+                        &task.prompt_summary,
+                        content_width.saturating_sub(2).max(1)
+                    )
+                ),
+                Style::default().fg(theme.text_dim),
+            )));
+        }
+    }
+}
+
+fn push_reasoning_row_hover_texts(
+    texts: &mut Vec<String>,
+    rows: &[TaskPanelEntry],
+    max_rows: usize,
+) {
+    for task in rows {
+        if texts.len() >= max_rows {
+            break;
+        }
+        let duration = task
+            .duration_ms
+            .map(format_duration_ms)
+            .unwrap_or_else(|| "-".to_string());
+        texts.push(format!("thinking {} {duration}", task.status));
+        if !task.prompt_summary.trim().is_empty() && texts.len() < max_rows {
+            texts.push(format!("  {}", task.prompt_summary));
         }
     }
 }
@@ -1424,7 +1502,19 @@ fn background_task_rows(app: &App, active_rows: &[SidebarToolRow]) -> Vec<TaskPa
     let mut rows: Vec<TaskPanelEntry> = app
         .task_panel
         .iter()
+        .filter(|task| task.kind == TaskPanelEntryKind::Background)
         .filter(|task| !background_task_duplicates_live_tool(task, active_rows))
+        .cloned()
+        .collect();
+    rows.sort_by_key(|task| (task_status_rank(task.status.as_str()), task.id.clone()));
+    rows
+}
+
+fn reasoning_task_rows(app: &App) -> Vec<TaskPanelEntry> {
+    let mut rows: Vec<TaskPanelEntry> = app
+        .task_panel
+        .iter()
+        .filter(|task| task.kind == TaskPanelEntryKind::ModelReasoning)
         .cloned()
         .collect();
     rows.sort_by_key(|task| (task_status_rank(task.status.as_str()), task.id.clone()));
@@ -2458,7 +2548,7 @@ mod tests {
     use crate::tools::plan::StepStatus;
     use crate::tools::todo::TodoStatus;
     use crate::tui::active_cell::ActiveCell;
-    use crate::tui::app::{App, HuntVerdict, TaskPanelEntry, TuiOptions};
+    use crate::tui::app::{App, HuntVerdict, TaskPanelEntry, TaskPanelEntryKind, TuiOptions};
     use crate::tui::history::{
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolStatus,
     };
@@ -3017,6 +3107,7 @@ mod tests {
             status: "running".to_string(),
             prompt_summary: "shell: cargo test --workspace".to_string(),
             duration_ms: Some(12_000),
+            kind: TaskPanelEntryKind::Background,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 80, 10));
@@ -3048,6 +3139,7 @@ mod tests {
             prompt_summary: "shell: cd /tmp/repo && cargo test --workspace --all-features"
                 .to_string(),
             duration_ms: Some(178_000),
+            kind: TaskPanelEntryKind::Background,
         });
 
         let text = lines_to_text(&task_panel_lines(&app, 96, 8));
@@ -3064,6 +3156,34 @@ mod tests {
     }
 
     #[test]
+    fn tasks_panel_renders_model_reasoning_outside_background_commands() {
+        let mut app = create_test_app();
+        app.task_panel.push(TaskPanelEntry {
+            id: "reasoning-1".to_string(),
+            status: "running".to_string(),
+            prompt_summary: "model reasoning".to_string(),
+            duration_ms: Some(4_200),
+            kind: TaskPanelEntryKind::ModelReasoning,
+        });
+
+        let text = lines_to_text(&task_panel_lines(&app, 80, 8));
+
+        assert!(
+            text.iter().any(|line| line == "Model reasoning"),
+            "reasoning section missing: {text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("thinking running 4.2s")),
+            "reasoning row should show live thinking duration: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|line| line.contains("Background commands")),
+            "reasoning must not be counted as a background command: {text:?}"
+        );
+    }
+
+    #[test]
     fn task_panel_actions_make_single_background_job_clickable() {
         let mut app = create_test_app();
         app.task_panel.push(TaskPanelEntry {
@@ -3071,6 +3191,7 @@ mod tests {
             status: "running".to_string(),
             prompt_summary: "shell: cargo build".to_string(),
             duration_ms: Some(1_000),
+            kind: TaskPanelEntryKind::Background,
         });
 
         let (lines, actions) = task_panel_rows(&app, 80, 12);
@@ -3101,12 +3222,14 @@ mod tests {
             status: "running".to_string(),
             prompt_summary: "shell: cargo test --workspace".to_string(),
             duration_ms: Some(2_000),
+            kind: TaskPanelEntryKind::Background,
         });
         app.task_panel.push(TaskPanelEntry {
             id: "task_bbb".to_string(),
             status: "running".to_string(),
             prompt_summary: "summarize the release notes".to_string(),
             duration_ms: Some(3_000),
+            kind: TaskPanelEntryKind::Background,
         });
 
         let (lines, actions) = task_panel_rows(&app, 96, 16);
@@ -3164,6 +3287,7 @@ mod tests {
             status: "completed".to_string(),
             prompt_summary: "shell: cargo fmt".to_string(),
             duration_ms: Some(500),
+            kind: TaskPanelEntryKind::Background,
         });
 
         let (lines, actions) = task_panel_rows(&app, 80, 12);
@@ -3207,6 +3331,7 @@ mod tests {
             status: "running".to_string(),
             prompt_summary: "investigate flaky test".to_string(),
             duration_ms: Some(9_000),
+            kind: TaskPanelEntryKind::Background,
         });
 
         let (lines, actions) = task_panel_rows(&app, 96, 16);

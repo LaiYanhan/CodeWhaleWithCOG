@@ -2384,13 +2384,13 @@ fn render_thinking(
     let mut lines = Vec::new();
 
     // Header: `…` opener (replaces the spinner; reasoning isn't a tool, it's
-    // a slow exhale) followed by the `thinking` label and live status.
+    // a slow exhale) followed by the reasoning label and live status.
     let mut header_spans = vec![
         Span::styled(
             format!("{REASONING_OPENER} "),
             Style::default().fg(thinking_state_accent(state)),
         ),
-        Span::styled("thinking", thinking_title_style()),
+        Span::styled("reasoning", thinking_title_style()),
     ];
     header_spans.push(Span::styled(" ", Style::default()));
     header_spans.push(Span::styled(
@@ -2456,7 +2456,7 @@ fn render_thinking(
 
     if rendered.is_empty() && streaming {
         let mut spans = vec![Span::styled(REASONING_RAIL.to_string(), rail_style)];
-        spans.push(Span::styled("thinking...", body_style.italic()));
+        spans.push(Span::styled("reasoning...", body_style.italic()));
         if !low_motion {
             spans.push(Span::styled(format!(" {REASONING_CURSOR}"), cursor_style));
         }
@@ -2514,7 +2514,7 @@ fn render_hidden_thinking_activity(
             format!("{REASONING_OPENER} "),
             Style::default().fg(thinking_state_accent(state)),
         ),
-        Span::styled("thinking", thinking_title_style()),
+        Span::styled("reasoning", thinking_title_style()),
         Span::styled(" ", Style::default()),
         Span::styled(thinking_status_label(state), thinking_status_style(state)),
     ];
@@ -4197,7 +4197,26 @@ mod tests {
             .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
             .collect::<String>();
         assert!(text.contains("Full reasoning in Ctrl+O"));
-        assert!(text.contains("thinking"));
+        // Pin the actual header shape ("… reasoning done") — a bare
+        // `contains("reasoning")` is already satisfied by the Ctrl+O
+        // affordance line above and would never fail on its own.
+        let header = lines
+            .first()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        assert!(
+            header.starts_with(REASONING_OPENER),
+            "header opens with the dotted opener: {header:?}"
+        );
+        assert!(
+            header.contains("reasoning done"),
+            "header carries the reasoning title and done status: {header:?}"
+        );
     }
 
     #[test]

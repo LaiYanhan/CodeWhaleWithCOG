@@ -178,7 +178,8 @@ pub struct TurnCacheRecord {
 ///
 /// The config file accepts all five string values for forward-compat with
 /// providers that expose the full spectrum; DeepSeek currently collapses
-/// `Low`/`Medium` → `high` and `Max` → `max` at the API boundary. The
+/// `Low`/`Medium` → `high`. OpenAI Codex displays and sends `Max` as
+/// `xhigh` at the provider boundary. The
 /// keyboard cycler (Shift+Tab) walks only the three behaviorally distinct
 /// tiers: `Off` → `High` → `Max` → `Off`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +232,15 @@ impl ReasoningEffort {
             Self::High => "high",
             Self::Auto => "auto",
             Self::Max => "max",
+        }
+    }
+
+    /// Provider-facing label for user-visible surfaces.
+    #[must_use]
+    pub fn display_label_for_provider(self, provider: ApiProvider) -> &'static str {
+        match (provider, self) {
+            (ApiProvider::OpenaiCodex, Self::Max) => "xhigh",
+            (_, effort) => effort.short_label(),
         }
     }
 
@@ -1787,6 +1797,13 @@ pub struct TaskPanelEntry {
     pub status: String,
     pub prompt_summary: String,
     pub duration_ms: Option<u64>,
+    pub kind: TaskPanelEntryKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPanelEntryKind {
+    Background,
+    ModelReasoning,
 }
 
 impl QueuedMessage {
@@ -2467,7 +2484,11 @@ impl App {
         self.last_effective_reasoning_effort = None;
         self.needs_redraw = true;
         self.push_status_toast(
-            format!("Thinking: {}", self.reasoning_effort.short_label()),
+            format!(
+                "Thinking: {}",
+                self.reasoning_effort
+                    .display_label_for_provider(self.api_provider)
+            ),
             StatusToastLevel::Info,
             Some(1_500),
         );
@@ -5041,11 +5062,16 @@ impl App {
     pub fn reasoning_effort_display_label(&self) -> String {
         if self.auto_model || self.reasoning_effort == ReasoningEffort::Auto {
             if let Some(effective) = self.last_effective_reasoning_effort {
-                return format!("auto: {}", effective.short_label());
+                return format!(
+                    "auto: {}",
+                    effective.display_label_for_provider(self.api_provider)
+                );
             }
             return "auto".to_string();
         }
-        self.reasoning_effort.short_label().to_string()
+        self.reasoning_effort
+            .display_label_for_provider(self.api_provider)
+            .to_string()
     }
 
     pub fn compaction_config(&self) -> CompactionConfig {
@@ -5350,6 +5376,32 @@ mod tests {
     fn test_trust_mode_follows_yolo_on_startup() {
         let app = App::new(test_options(true), &Config::default());
         assert!(app.trust_mode);
+    }
+
+    #[test]
+    fn reasoning_effort_display_label_uses_codex_xhigh() {
+        assert_eq!(
+            ReasoningEffort::Max.display_label_for_provider(ApiProvider::OpenaiCodex),
+            "xhigh"
+        );
+        assert_eq!(
+            ReasoningEffort::Max.display_label_for_provider(ApiProvider::Deepseek),
+            "max"
+        );
+        assert_eq!(
+            ReasoningEffort::High.display_label_for_provider(ApiProvider::OpenaiCodex),
+            "high"
+        );
+
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::OpenaiCodex;
+        app.reasoning_effort = ReasoningEffort::Max;
+        app.auto_model = false;
+        assert_eq!(app.reasoning_effort_display_label(), "xhigh");
+
+        app.reasoning_effort = ReasoningEffort::Auto;
+        app.last_effective_reasoning_effort = Some(ReasoningEffort::Max);
+        assert_eq!(app.reasoning_effort_display_label(), "auto: xhigh");
     }
 
     #[test]
