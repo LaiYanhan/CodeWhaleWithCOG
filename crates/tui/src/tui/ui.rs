@@ -8771,8 +8771,28 @@ fn render_toast_stack_overlay(
 }
 
 pub(crate) fn request_foreground_shell_background(app: &mut App) {
-    if !app.is_loading || !active_foreground_shell_running(app) {
+    if !app.is_loading {
         app.status_message = Some("No foreground shell command to background".to_string());
+        return;
+    }
+    if !active_foreground_shell_running(app) {
+        // #3032 AC3: name the reason backgrounding is unavailable —
+        // interactive execs and non-shell blocking tools are visibly running
+        // but cannot be detached, and a generic shrug reads like a bug.
+        let reason = if terminal_pause_has_live_owner(app) {
+            "the running command is interactive"
+        } else if app
+            .active_cell
+            .as_ref()
+            .is_some_and(|active| !active.is_empty())
+        {
+            "the running tool is not a foreground shell command"
+        } else {
+            "no foreground shell command is running"
+        };
+        app.status_message = Some(format!(
+            "Cannot background: {reason}. Press Ctrl+C to cancel the turn, or wait for completion."
+        ));
         return;
     }
 

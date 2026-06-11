@@ -957,7 +957,7 @@ impl ExecCell {
                 ));
             } else if self.status == ToolStatus::Running && self.source == ExecSource::Assistant {
                 lines.extend(wrap_plain_line(
-                    "  Ctrl+B opens shell controls.",
+                    "  Ctrl+B backgrounds this command.",
                     Style::default().fg(palette::TEXT_MUTED),
                     width,
                 ));
@@ -5075,7 +5075,7 @@ mod tests {
 
         assert!(text.contains("running line 1"));
         assert!(text.contains("running line 2"));
-        assert!(!text.contains("Ctrl+B opens shell controls"));
+        assert!(!text.contains("Ctrl+B backgrounds this command"));
     }
 
     #[test]
