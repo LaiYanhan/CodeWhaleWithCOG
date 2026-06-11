@@ -6521,7 +6521,10 @@ fn spawn_external_url_command(mut command: Command) -> Result<()> {
 
 fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: PathBuf) {
     app.workspace = workspace.clone();
-    app.hooks = HookExecutor::new(config.hooks_config(), workspace.clone());
+    app.hooks = HookExecutor::new(
+        crate::hooks::HooksConfig::load_with_project(config.hooks_config(), &workspace),
+        workspace.clone(),
+    );
     app.skills_dir = crate::tui::app::resolve_skills_dir(&workspace, &config.skills_dir(), config);
     app.refresh_skill_cache();
     app.workspace_context = None;

@@ -2047,8 +2047,10 @@ impl App {
         let allow_shell = allow_shell || initial_mode == AppMode::Yolo;
         let shell_manager = new_shared_shell_manager(workspace.clone());
 
-        // Initialize hooks executor from config
-        let hooks_config = config.hooks_config();
+        // Initialize hooks executor from config, merged with project-local
+        // `.codewhale/hooks.toml` (#3026).
+        let hooks_config =
+            crate::hooks::HooksConfig::load_with_project(config.hooks_config(), &workspace);
         let hooks = HookExecutor::new(hooks_config, workspace.clone());
 
         // Initialize plan state

@@ -1332,11 +1332,15 @@ impl Engine {
             let active_tools_at_batch_start = active_tool_names.clone();
             let mut deferred_tools_hydrated_this_batch: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            // #3026: `additionalContext` strings from tool_call_before hooks,
+            // keyed by tool id; appended to the tool result sent to the model.
+            let mut hook_contexts: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
             let mut plans: Vec<ToolExecutionPlan> = Vec::with_capacity(tool_uses.len());
             for (index, tool) in tool_uses.iter_mut().enumerate() {
                 let tool_id = tool.id.clone();
                 let mut tool_name = tool.name.clone();
-                let tool_input = tool.input.clone();
+                let mut tool_input = tool.input.clone();
                 let tool_caller = tool.caller.clone();
                 crate::logging::info(format!(
                     "Planning tool '{tool_name}' with input: {tool_input:?}"
@@ -1362,6 +1366,10 @@ impl Engine {
                 let mut read_only = false;
                 let mut blocked_error: Option<ToolError> = None;
                 let mut guard_result: Option<ToolResult> = None;
+                // #3026: set by a hook `ask` decision; applied AFTER the
+                // registry-based approval computation below so it cannot be
+                // clobbered by it.
+                let mut hook_requires_approval = false;
 
                 if mode == AppMode::Plan
                     && matches!(
@@ -1456,29 +1464,25 @@ impl Engine {
                         tracing::error!("Hook executor task panicked: {join_err}");
                         Vec::new()
                     });
-                    if let Some(denial) = hook_results
-                        .iter()
-                        .find(|result| result.exit_code == Some(2))
-                    {
-                        let reason = denial
-                            .stdout
-                            .trim()
-                            .lines()
-                            .next()
-                            .filter(|line| !line.is_empty())
-                            .or_else(|| {
-                                denial
-                                    .stderr
-                                    .trim()
-                                    .lines()
-                                    .next()
-                                    .filter(|line| !line.is_empty())
-                            })
-                            .or(denial.error.as_deref())
-                            .unwrap_or("ToolCallBefore hook denied tool execution");
+                    // #3026: fold all foreground hook results into one
+                    // decision: deny (exit code 2 or JSON) > ask > allow;
+                    // last `updatedInput` writer wins; `additionalContext`
+                    // strings are concatenated.
+                    let fold = fold_tool_call_before_results(&hook_results);
+                    if let Some(reason) = fold.deny_reason {
                         blocked_error = Some(ToolError::permission_denied(format!(
                             "ToolCallBefore hook denied tool '{tool_name}': {reason}"
                         )));
+                    } else {
+                        if fold.requires_approval {
+                            hook_requires_approval = true;
+                        }
+                        if let Some(updated) = fold.updated_input {
+                            tool_input = updated;
+                        }
+                        if let Some(context) = fold.additional_context {
+                            hook_contexts.insert(tool_id.clone(), context);
+                        }
                     }
                 }
 
@@ -1512,6 +1516,14 @@ impl Engine {
                     approval_description = "Search tool catalog".to_string();
                     supports_parallel = false;
                     read_only = true;
+                }
+
+                // #3026: a hook `ask` decision forces the approval prompt even
+                // for tools the registry would auto-run. Must stay after the
+                // registry-based computation above, which assigns rather than
+                // ORs `approval_required`.
+                if hook_requires_approval {
+                    approval_required = true;
                 }
 
                 let should_emit_hydration_status =
@@ -2139,6 +2151,15 @@ impl Engine {
                                 .await;
                         }
 
+                        // #3026: pipe `additionalContext` from tool_call_before
+                        // hooks back to the model alongside the tool result.
+                        let output_for_context = match hook_contexts.get(&outcome.id) {
+                            Some(context) => {
+                                format!("{output_for_context}\n\n[hook context] {context}")
+                            }
+                            None => output_for_context,
+                        };
+
                         self.add_session_message(Message {
                             role: "user".to_string(),
                             content: vec![ContentBlock::ToolResult {
@@ -2386,6 +2407,81 @@ pub(super) fn command_allows_tool(allowed_tools: Option<&[String]>, tool_name: &
         return true;
     };
     allowed_tools.contains(&tool_name.to_ascii_lowercase())
+}
+
+/// Folded outcome of all `tool_call_before` hook results for one tool call
+/// (#3026). Precedence: deny (exit code 2 or JSON) > ask > allow;
+/// `updatedInput` is last-writer-wins; `additionalContext` is concatenated.
+#[derive(Debug, Default, PartialEq)]
+struct ToolCallHookFold {
+    /// Denial reason from an exit-code-2 hook or a JSON `deny` decision.
+    deny_reason: Option<String>,
+    /// At least one hook returned a JSON `ask` decision.
+    requires_approval: bool,
+    /// Replacement tool input from the last hook that supplied one.
+    updated_input: Option<serde_json::Value>,
+    /// Concatenated `additionalContext` strings from all hooks.
+    additional_context: Option<String>,
+}
+
+fn fold_tool_call_before_results(results: &[crate::hooks::HookResult]) -> ToolCallHookFold {
+    let mut fold = ToolCallHookFold::default();
+
+    // Legacy hard deny: exit code 2 wins regardless of stdout (backwards
+    // compatible with pre-#3026 hooks).
+    if let Some(denial) = results.iter().find(|result| result.exit_code == Some(2)) {
+        let reason = denial
+            .stdout
+            .trim()
+            .lines()
+            .next()
+            .filter(|line| !line.is_empty())
+            .or_else(|| {
+                denial
+                    .stderr
+                    .trim()
+                    .lines()
+                    .next()
+                    .filter(|line| !line.is_empty())
+            })
+            .or(denial.error.as_deref())
+            .unwrap_or("ToolCallBefore hook denied tool execution");
+        fold.deny_reason = Some(reason.to_string());
+        return fold;
+    }
+
+    for result in results {
+        // Background hooks return immediately with no process result and
+        // cannot steer (the caller warns about that configuration).
+        if result.exit_code.is_none() {
+            continue;
+        }
+        let parsed = crate::hooks::parse_tool_call_before_stdout(&result.stdout);
+        match parsed.decision {
+            Some(crate::hooks::ToolCallDecision::Deny) => {
+                fold.deny_reason =
+                    Some(parsed.reason.unwrap_or_else(|| {
+                        "ToolCallBefore hook denied tool execution".to_string()
+                    }));
+                return fold;
+            }
+            Some(crate::hooks::ToolCallDecision::Ask) => fold.requires_approval = true,
+            Some(crate::hooks::ToolCallDecision::Allow) | None => {}
+        }
+        if let Some(updated) = parsed.updated_input {
+            fold.updated_input = Some(updated);
+        }
+        if let Some(context) = parsed.additional_context {
+            match &mut fold.additional_context {
+                Some(existing) => {
+                    existing.push('\n');
+                    existing.push_str(&context);
+                }
+                None => fold.additional_context = Some(context),
+            }
+        }
+    }
+    fold
 }
 
 /// Check whether `tool_name` is explicitly denied (#3027).
@@ -2879,5 +2975,150 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].exit_code, Some(2));
         assert!(results[0].stdout.contains("security"));
+    }
+
+    // ── #3026: JSON decision contract fold ─────────────────────────────────
+
+    fn hook_result(stdout: &str, exit_code: Option<i32>) -> crate::hooks::HookResult {
+        crate::hooks::HookResult {
+            name: None,
+            success: exit_code == Some(0),
+            exit_code,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            duration: Duration::from_millis(1),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn hook_fold_json_deny_blocks_with_reason() {
+        let fold = fold_tool_call_before_results(&[hook_result(
+            r#"{"decision":"deny","reason":"nope"}"#,
+            Some(0),
+        )]);
+        assert_eq!(fold.deny_reason.as_deref(), Some("nope"));
+        assert!(!fold.requires_approval);
+    }
+
+    #[test]
+    fn hook_fold_exit_code_2_denies_regardless_of_stdout() {
+        let fold =
+            fold_tool_call_before_results(&[hook_result(r#"{"decision":"allow"}"#, Some(2))]);
+        assert!(
+            fold.deny_reason.is_some(),
+            "exit code 2 must hard-deny even when stdout says allow"
+        );
+    }
+
+    #[test]
+    fn hook_fold_deny_wins_over_ask_and_allow() {
+        let fold = fold_tool_call_before_results(&[
+            hook_result(r#"{"decision":"allow"}"#, Some(0)),
+            hook_result(r#"{"decision":"ask"}"#, Some(0)),
+            hook_result(r#"{"decision":"deny","reason":"policy"}"#, Some(0)),
+        ]);
+        assert_eq!(fold.deny_reason.as_deref(), Some("policy"));
+    }
+
+    #[test]
+    fn hook_fold_ask_requires_approval() {
+        let fold = fold_tool_call_before_results(&[
+            hook_result(r#"{"decision":"allow"}"#, Some(0)),
+            hook_result(r#"{"decision":"ask"}"#, Some(0)),
+        ]);
+        assert!(fold.deny_reason.is_none());
+        assert!(fold.requires_approval);
+    }
+
+    #[test]
+    fn hook_fold_updated_input_last_writer_wins() {
+        let fold = fold_tool_call_before_results(&[
+            hook_result(r#"{"updatedInput":{"command":"first"}}"#, Some(0)),
+            hook_result(r#"{"updatedInput":{"command":"second"}}"#, Some(0)),
+        ]);
+        assert_eq!(
+            fold.updated_input,
+            Some(serde_json::json!({"command":"second"}))
+        );
+    }
+
+    #[test]
+    fn hook_fold_background_results_cannot_steer() {
+        // Background hooks return exit_code: None immediately — their stdout
+        // (if any were captured) must not deny, ask, or rewrite input.
+        let fold = fold_tool_call_before_results(&[hook_result(
+            r#"{"decision":"deny","reason":"too late"}"#,
+            None,
+        )]);
+        assert_eq!(fold, ToolCallHookFold::default());
+    }
+
+    #[test]
+    fn hook_fold_concatenates_additional_context() {
+        let fold = fold_tool_call_before_results(&[
+            hook_result(r#"{"additionalContext":"one"}"#, Some(0)),
+            hook_result(r#"{"additionalContext":"two"}"#, Some(0)),
+        ]);
+        assert_eq!(fold.additional_context.as_deref(), Some("one\ntwo"));
+    }
+
+    #[test]
+    fn hook_fold_legacy_stdout_is_passthrough() {
+        let fold = fold_tool_call_before_results(&[
+            hook_result("", Some(0)),
+            hook_result("not json at all", Some(0)),
+            hook_result(r#"{"status":"fine"}"#, Some(1)),
+        ]);
+        assert_eq!(fold, ToolCallHookFold::default());
+    }
+
+    #[test]
+    fn hook_gate_denies_with_json_decision_from_executor() {
+        use crate::hooks::{Hook, HookContext, HookEvent, HookExecutor, HooksConfig};
+
+        let deny_cmd = if cfg!(windows) {
+            r#"echo {"decision":"deny","reason":"blocked by project policy"}"#
+        } else {
+            r#"echo '{"decision":"deny","reason":"blocked by project policy"}'"#
+        };
+        let config = HooksConfig {
+            enabled: true,
+            hooks: vec![Hook::new(HookEvent::ToolCallBefore, deny_cmd)],
+            ..HooksConfig::default()
+        };
+        let executor = HookExecutor::new(config, std::path::PathBuf::from("."));
+        let ctx = HookContext::new().with_tool_name("exec_shell");
+        let results = executor.execute(HookEvent::ToolCallBefore, &ctx);
+
+        let fold = fold_tool_call_before_results(&results);
+        assert_eq!(
+            fold.deny_reason.as_deref(),
+            Some("blocked by project policy"),
+            "JSON deny with exit code 0 must block: {results:?}"
+        );
+    }
+
+    #[test]
+    fn hook_gate_ask_forces_approval_from_executor() {
+        use crate::hooks::{Hook, HookContext, HookEvent, HookExecutor, HooksConfig};
+
+        let ask_cmd = if cfg!(windows) {
+            r#"echo {"decision":"ask"}"#
+        } else {
+            r#"echo '{"decision":"ask"}'"#
+        };
+        let config = HooksConfig {
+            enabled: true,
+            hooks: vec![Hook::new(HookEvent::ToolCallBefore, ask_cmd)],
+            ..HooksConfig::default()
+        };
+        let executor = HookExecutor::new(config, std::path::PathBuf::from("."));
+        let ctx = HookContext::new().with_tool_name("write_file");
+        let results = executor.execute(HookEvent::ToolCallBefore, &ctx);
+
+        let fold = fold_tool_call_before_results(&results);
+        assert!(fold.deny_reason.is_none());
+        assert!(fold.requires_approval);
     }
 }
