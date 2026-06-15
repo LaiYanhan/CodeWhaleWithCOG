@@ -87,7 +87,7 @@ codewhale exec --allowed-tools read_file,exec_shell --max-turns 10 "fix the fail
 - **プロバイダを認識する並行サブエージェント** *(0.8.58)*。調査と実装を並列に進め、big/cheap のモデル階層はプロバイダごとに解決されます — モデル ID のハードコードはありません。
 - **耐久性のあるセッション。** fork、relay 引き継ぎ、そして Plan/Agent/YOLO のモード切り替えをまたいでもバイト単位で安定する、セッション横断のディスク永続プロンプトキャッシュ *(0.8.56)*。ターンはシステムのスリープも生き延びます *(0.8.57)*: ストリーミング中にサスペンドしても、復帰後にリクエストが静かに再発行され、ターンは失敗しません。
 - **ヘッドレスモード。** スクリプトや CI 向けに、`codewhale exec` が `--allowed-tools`、`--disallowed-tools`（deny 優先）、`--max-turns`、`--append-system-prompt` *(0.8.58)* に対応。
-- **どこにでも組み込める。** HTTP/SSE と ACP の Runtime API、VS Code 拡張（Phase 0）、Telegram/Feishu ブリッジ。
+- **どこにでも組み込める。** HTTP/SSE と ACP の Runtime API、VS Code 拡張（Phase 0）、Telegram/Feishu ブリッジ（Weixin ブリッジは実験的）。
 - **日常使いの磨き込み。** MCP のクライアント*かつ*サーバー、再利用可能なスキル、7 ロケールのローカライズ（0.8.56 から承認ダイアログも対象）、Xiaomi MiMo による音声合成（TTS）。
 
 ### あらゆるモデル、まずはオープンモデル
@@ -102,9 +102,11 @@ codewhale exec --allowed-tools read_file,exec_shell --max-turns 10 "fix the fail
 
 上のバージョンタグは、直近 3 リリース（0.8.56 → 0.8.58）で入ったものを示しています。詳細は [CHANGELOG.md](CHANGELOG.md) を参照してください。
 
-## 考え方
+## 考え方 — このバージョンに入れている mission idea
 
 多くのコーディングエージェントは、力を足すところから始めます。もっと多くのツール、もっと長いコンテキスト、もっと強い自律性。CodeWhale は責任を割り当てるところから始めます。
+
+（これはこのバージョンで形にしているデザインミッションです。memory や cost、remote orchestration の具体的な形はまだイテレーション中です — 下の v0.9.0 Track を参照。）
 
 リポジトリを編集するエージェントには住所があるべきです — このターミナル、このユーザー、このブランチ、このセッション。人格ではなく、返送先の住所です。何かが壊れたとき、「モデルがやった」は答えになりません。「このインスタンスが、このセッションで、この承認のあとに」なら答えになります。
 

@@ -110,7 +110,7 @@ codewhale exec --allowed-tools read_file,exec_shell --max-turns 10 "fix the fail
   `--disallowed-tools`（deny 优先）、`--max-turns` 和
   `--append-system-prompt` *(0.8.58)*，面向脚本和 CI。
 - **随处可嵌入。** HTTP/SSE 与 ACP 运行时 API、VS Code 扩展（Phase 0），
-  以及 Telegram/飞书桥接。
+  以及 Telegram/飞书桥接（微信桥接实验性）。
 - **日常主力的打磨。** MCP 客户端*和*服务器、可复用 skills、7 种语言本地化
   （0.8.56 起覆盖审批对话框），以及基于小米 MiMo 的语音/TTS。
 
@@ -138,10 +138,12 @@ base URL、能力边界——见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。
 上面的版本标注对应最近三个版本（0.8.56 → 0.8.58）落地的内容。完整细节见
 [CHANGELOG.md](CHANGELOG.md)。
 
-## 核心想法
+## 核心想法 —— 这个版本放进来的 mission idea
 
 多数编程 Agent 从加码开始：更多工具、更长上下文、更多自主性。CodeWhale
 从落实责任开始。
+
+（这是本版本正在落地的设计使命；memory、cost、remote orchestration 等具体形态仍在迭代，详见下方的 v0.9.0 轨道。）
 
 一个会改你仓库的 Agent 应该有一个地址——这个终端、这个用户、这个分支、
 这个会话。不是人格面具，而是一个回信地址。出了问题，“是模型干的”不是答案；

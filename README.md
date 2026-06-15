@@ -120,7 +120,7 @@ rails are runtime mechanisms, not advice the model has to remember:
   `--disallowed-tools` (deny wins), `--max-turns`, and
   `--append-system-prompt` *(0.8.58)* for scripts and CI.
 - **Embedded everywhere.** HTTP/SSE and ACP runtime APIs, a VS Code extension
-  (Phase 0), and Telegram/Feishu bridges.
+  (Phase 0), and Telegram/Feishu bridges (Weixin bridge experimental).
 - **Daily-driver polish.** MCP client *and* server, reusable skills, 7-locale
   localization (approval dialogs included since 0.8.56), and speech/TTS via
   Xiaomi MiMo.
@@ -153,7 +153,7 @@ registry — credentials, base URLs, capability boundaries — lives in
 The version tags above mark what landed in the last three releases
 (0.8.56 → 0.8.58). Full details in [CHANGELOG.md](CHANGELOG.md).
 
-## The Idea
+## The Idea — mission idea put in this version
 
 Most coding agents start by adding power: more tools, more context, more
 autonomy. CodeWhale starts by assigning responsibility.
@@ -162,6 +162,10 @@ An agent that edits your repo should have an address — this terminal, this
 user, this branch, this session. Not a persona; a return address. When
 something breaks, "the model did it" is not an answer. "This instance, in this
 session, after this approval" is.
+
+*(This is the design mission being put in place in this version. The exact
+shape — especially memory, cost accounting, and remote orchestration — is
+still iterating; see the v0.9.0 track below.)*
 
 Then it needs law. A real working session is a conflict stack: your current
 request, the repo's instructions, fresh shell output, stale memory, and a
