@@ -788,11 +788,20 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 }
 
 pub fn default_automations_dir() -> PathBuf {
+    // Most-specific override: an explicit automations dir.
     if let Ok(path) = std::env::var("DEEPSEEK_AUTOMATIONS_DIR") {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
         }
+    }
+    // $CODEWHALE_HOME is a hard override of the base data directory
+    // (docs/CONFIGURATION.md): when SET, automations live under it and we do
+    // NOT fall back to the legacy ~/.deepseek path — silent fallback would
+    // defeat the isolation the override promises. Check the env var directly
+    // (not codewhale_home()'s Ok/Err, which succeeds for the default home too).
+    if let Some(home) = std::env::var_os("CODEWHALE_HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(home).join("automations");
     }
     dirs::home_dir()
         .map(|home| {
@@ -940,5 +949,41 @@ mod tests {
 
         assert!(manager.get_automation(&created.id).is_err());
         assert!(!manager.runs_dir_for(&created.id).exists());
+    }
+
+    #[test]
+    fn default_automations_dir_honors_codewhale_home_as_hard_override() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: serialised by lock_test_env.
+        unsafe {
+            std::env::remove_var("DEEPSEEK_AUTOMATIONS_DIR");
+            std::env::set_var("CODEWHALE_HOME", tmp.path());
+        }
+        // $CODEWHALE_HOME IS the home dir (no ".codewhale" appended); the
+        // legacy ~/.deepseek fallback is bypassed entirely.
+        assert_eq!(default_automations_dir(), tmp.path().join("automations"));
+        // SAFETY: cleanup under the same lock.
+        unsafe {
+            std::env::remove_var("CODEWHALE_HOME");
+        }
+    }
+
+    #[test]
+    fn default_automations_dir_prefers_deepseek_automations_dir_over_codewhale_home() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // SAFETY: serialised by lock_test_env.
+        unsafe {
+            std::env::set_var("DEEPSEEK_AUTOMATIONS_DIR", tmp.path());
+            std::env::set_var("CODEWHALE_HOME", "/should/not/be/used");
+        }
+        // The most-specific override wins over the base-data-dir override.
+        assert_eq!(default_automations_dir(), tmp.path());
+        // SAFETY: cleanup under the same lock.
+        unsafe {
+            std::env::remove_var("DEEPSEEK_AUTOMATIONS_DIR");
+            std::env::remove_var("CODEWHALE_HOME");
+        }
     }
 }
