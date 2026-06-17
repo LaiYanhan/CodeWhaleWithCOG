@@ -796,9 +796,7 @@ impl DeepSeekClient {
         &self.base_url
     }
 
-    /// Returns the active API provider for this client. Used by the turn loop
-    /// to apply provider-specific request policies (e.g. Arcee's reduced
-    /// first-turn tool surface that clears the Cloudflare WAF).
+    /// Returns the active API provider for this client.
     pub fn api_provider(&self) -> ApiProvider {
         self.api_provider
     }

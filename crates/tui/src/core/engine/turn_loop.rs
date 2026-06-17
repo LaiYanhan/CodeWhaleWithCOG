@@ -92,14 +92,6 @@ impl Engine {
         let mut tool_catalog = tools.unwrap_or_default();
         if !tool_catalog.is_empty() {
             ensure_advanced_tooling(&mut tool_catalog, mode, &self.config.tools_always_load);
-            // Provider-specific first-turn surface (e.g. Arcee's Cloudflare WAF
-            // rejects CodeWhale's full agent catalog). Runs after advanced
-            // tooling so code/js-execution and tool-search rows are policed too.
-            apply_provider_tool_policy(
-                &mut tool_catalog,
-                client.api_provider(),
-                &self.config.tools_always_load,
-            );
         }
         let mut active_tool_names = initial_active_tools(&tool_catalog);
         let mut loop_guard = LoopGuard::default();
