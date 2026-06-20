@@ -809,7 +809,7 @@ fn persist_session_with_age(world: &SessionCommandWorld, session_id: &str, title
 
 fn load_saved_session(world: &SessionCommandWorld, session_id: &str) -> SavedSession {
     try_load_saved_session(world, session_id)
-        .unwrap_or_else(|err| panic!("load session {session_id}: {err}"))
+        .unwrap_or_else(|_| panic!("load saved session failed"))
 }
 
 fn try_load_saved_session(
