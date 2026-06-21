@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::deepseek_theme::active_theme;
 use crate::models::{ContentBlock, Message};
 use crate::palette;
-use crate::tools::plan::{PlanSnapshot, StepStatus};
+use crate::tools::plan::PlanSnapshot;
 use crate::tools::review::ReviewOutput;
 use crate::tui::app::TranscriptSpacing;
 use crate::tui::diff_render;
@@ -19,10 +19,12 @@ use crate::tui::markdown_render;
 use crate::tui::ui_text::{CopyLineSeparator, truncate_line_to_width};
 
 mod archived_context;
+mod plan;
 mod tool_run;
 
 use archived_context::{parse_archived_context, render_archived_context};
 
+pub use plan::PlanUpdateCell;
 pub use tool_run::{
     ToolRun, ToolRunActivitySummary, detect_tool_runs, detect_tool_runs_from_slices,
     tool_run_summary,
@@ -900,89 +902,6 @@ impl ExploringCell {
 pub struct ExploringEntry {
     pub label: String,
     pub status: ToolStatus,
-}
-
-/// Cell for plan updates emitted by the plan tool.
-#[derive(Debug, Clone)]
-pub struct PlanUpdateCell {
-    pub snapshot: PlanSnapshot,
-    pub status: ToolStatus,
-}
-
-impl PlanUpdateCell {
-    /// Render the plan update cell into lines.
-    pub fn lines_with_motion(&self, width: u16, low_motion: bool) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        lines.push(render_tool_header(
-            "Plan",
-            tool_status_label(self.status),
-            self.status,
-            None,
-            low_motion,
-        ));
-
-        render_plan_snapshot_lines(&self.snapshot, &mut lines, width);
-
-        lines
-    }
-}
-
-fn render_plan_snapshot_lines(snapshot: &PlanSnapshot, lines: &mut Vec<Line<'static>>, width: u16) {
-    render_plan_optional(lines, "title", snapshot.title.as_deref(), width);
-    render_plan_optional(lines, "objective", snapshot.objective.as_deref(), width);
-    render_plan_optional(lines, "context", snapshot.context_summary.as_deref(), width);
-    render_plan_optional(lines, "explain", snapshot.explanation.as_deref(), width);
-    render_plan_list(lines, "source", &snapshot.sources_used, width);
-    render_plan_list(lines, "file", &snapshot.critical_files, width);
-    render_plan_list(lines, "constraint", &snapshot.constraints, width);
-    render_plan_optional(
-        lines,
-        "approach",
-        snapshot.recommended_approach.as_deref(),
-        width,
-    );
-    render_plan_optional(
-        lines,
-        "verify",
-        snapshot.verification_plan.as_deref(),
-        width,
-    );
-    render_plan_optional(lines, "risk", snapshot.risks_and_unknowns.as_deref(), width);
-    render_plan_optional(lines, "handoff", snapshot.handoff_packet.as_deref(), width);
-
-    for step in &snapshot.items {
-        let marker = match step.status {
-            StepStatus::Completed => "done",
-            StepStatus::InProgress => "live",
-            StepStatus::Pending => "next",
-        };
-        lines.extend(render_compact_kv(
-            marker,
-            &step.step,
-            tool_value_style(),
-            width,
-        ));
-    }
-}
-
-fn render_plan_optional(
-    lines: &mut Vec<Line<'static>>,
-    label: &str,
-    value: Option<&str>,
-    width: u16,
-) {
-    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
-        lines.extend(render_compact_kv(label, value, tool_value_style(), width));
-    }
-}
-
-fn render_plan_list(lines: &mut Vec<Line<'static>>, label: &str, values: &[String], width: u16) {
-    for value in values {
-        let value = value.trim();
-        if !value.is_empty() {
-            lines.extend(render_compact_kv(label, value, tool_value_style(), width));
-        }
-    }
 }
 
 /// Cell for patch summaries emitted by the patch tool.
