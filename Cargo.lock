@@ -853,7 +853,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "toml 0.9.11+spec-1.1.0",
+ "toml",
  "toml_edit",
  "tracing",
 ]
@@ -1027,7 +1027,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "tokio-util",
- "toml 0.9.11+spec-1.1.0",
+ "toml",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -4494,7 +4494,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tokio",
- "toml 1.0.6+spec-1.1.0",
+ "toml",
  "unicode-width 0.2.2",
 ]
 
@@ -5392,21 +5392,6 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "toml"
-version = "0.9.11+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3afc9a848309fe1aaffaed6e1546a7a14de1f935dc9d89d32afd9a44bab7c46"
-dependencies = [
- "indexmap",
- "serde_core",
- "serde_spanned",
- "toml_datetime 0.7.5+spec-1.1.0",
- "toml_parser",
- "toml_writer",
- "winnow 0.7.14",
 ]
 
 [[package]]
