@@ -8,8 +8,10 @@
 //!    when absent, the workspace default provider scope is used. The provider
 //!    is NEVER inferred from a model prefix.
 //! 2. the model selector, interpreted STRICTLY within that provider's scope
-//!    against [`bundled_offerings`] plus the provider default. Prefixed
-//!    selectors are preserved verbatim as the [`WireModelId`].
+//!    against resolver-provided offerings plus the provider default. The default
+//!    resolver uses [`bundled_offerings`], while tests or snapshot loaders can
+//!    inject Models.dev-derived rows. Prefixed selectors are preserved verbatim
+//!    as the [`WireModelId`].
 //! 3. `auto` => the [`LogicalModelRef::is_auto`] sentinel, never a literal
 //!    model.
 //!
@@ -31,7 +33,7 @@ use super::candidate::{
 use super::descriptor::ProviderDescriptor;
 use super::errors::RouteError;
 use super::ids::{LogicalModelRef, ModelId, ProviderId, WireModelId};
-use super::offering::bundled_offerings;
+use super::offering::{ProviderModelOffering, bundled_offerings};
 use crate::ProviderKind;
 
 /// A request to resolve into an executable route.
@@ -51,14 +53,32 @@ pub struct RouteRequest {
 }
 
 /// Resolves [`RouteRequest`]s into [`ReadyRouteCandidate`]s.
-#[derive(Debug, Clone, Default)]
-pub struct RouteResolver;
+#[derive(Debug, Clone)]
+pub struct RouteResolver {
+    offerings: Vec<ProviderModelOffering>,
+}
+
+impl Default for RouteResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RouteResolver {
-    /// Construct a resolver.
+    /// Construct a resolver with CodeWhale's bundled offline offerings.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::from_offerings(bundled_offerings())
+    }
+
+    /// Construct a resolver from a provider-scoped offering catalog.
+    ///
+    /// This is the bridge for Models.dev snapshots: callers parse a catalog,
+    /// emit provider offerings, then hand those rows to the resolver without
+    /// changing route-resolution semantics.
+    #[must_use]
+    pub fn from_offerings(offerings: Vec<ProviderModelOffering>) -> Self {
+        Self { offerings }
     }
 
     /// Resolve a request into an executable route candidate.
@@ -72,6 +92,7 @@ impl RouteResolver {
         let provider_kind = req.explicit_provider.unwrap_or_default();
         let descriptor = ProviderDescriptor::for_kind(provider_kind);
         let provider_id = descriptor.id();
+        let default_offering = self.default_offering(&provider_id);
 
         // 2. Determine the logical selector from explicit choice, then the
         //    saved-model fallback, then the provider default.
@@ -84,7 +105,12 @@ impl RouteResolver {
                     .saved_provider_model
                     .as_ref()
                     .map(|w| w.as_str().to_string())
-                    .unwrap_or_else(|| descriptor.default_wire_model().as_str().to_string());
+                    .unwrap_or_else(|| {
+                        default_offering.map_or_else(
+                            || descriptor.default_wire_model().as_str().to_string(),
+                            |offering| offering.wire_model_id.as_str().to_string(),
+                        )
+                    });
                 LogicalModelRef::from(raw)
             }
         };
@@ -102,8 +128,17 @@ impl RouteResolver {
         // 4. Map the selector to a wire id within provider scope.
         //    Prefixed selectors are preserved VERBATIM as the wire id.
         let class = classify(provider_kind);
-        let (wire_model_id, canonical_model) = if is_auto {
-            (descriptor.default_wire_model(), None)
+        let (wire_model_id, canonical_model, endpoint_key) = if is_auto {
+            default_offering.map_or_else(
+                || (descriptor.default_wire_model(), None, "chat".to_string()),
+                |offering| {
+                    (
+                        offering.wire_model_id.clone(),
+                        offering.canonical_model.clone(),
+                        offering.endpoint_key.clone(),
+                    )
+                },
+            )
         } else {
             self.scope_selector(provider_kind, &provider_id, &logical_model, class)?
         };
@@ -113,7 +148,7 @@ impl RouteResolver {
                 .base_url_override
                 .clone()
                 .unwrap_or_else(|| descriptor.default_base_url().to_string()),
-            endpoint_key: "chat".to_string(),
+            endpoint_key,
             protocol: descriptor.protocol(),
         };
 
@@ -143,13 +178,13 @@ impl RouteResolver {
         provider_id: &ProviderId,
         logical_model: &LogicalModelRef,
         class: ProviderClass,
-    ) -> Result<(WireModelId, Option<ModelId>), RouteError> {
+    ) -> Result<(WireModelId, Option<ModelId>, String), RouteError> {
         let raw = logical_model.raw();
 
-        // Try to match a bundled offering owned by THIS provider, either by
+        // Try to match a catalog offering owned by THIS provider, either by
         // canonical model id or by exact wire id. This keeps interpretation
         // inside provider scope; offerings from other providers are ignored.
-        for offering in bundled_offerings() {
+        for offering in &self.offerings {
             if offering.provider != *provider_id {
                 continue;
             }
@@ -159,13 +194,23 @@ impl RouteResolver {
                 .is_some_and(|m| m.as_str() == raw);
             let matches_wire = offering.wire_model_id.as_str() == raw;
             if matches_canonical || matches_wire {
-                return Ok((offering.wire_model_id, offering.canonical_model));
+                return Ok((
+                    offering.wire_model_id.clone(),
+                    offering.canonical_model.clone(),
+                    offering.endpoint_key.clone(),
+                ));
             }
         }
 
         // No catalog match. Apply class-specific pass-through rules.
         match class {
             ProviderClass::StrictDirect => {
+                if self.selector_matches_other_provider_offering(provider_id, raw) {
+                    return Err(RouteError::ForeignModelForDirectProvider {
+                        provider: provider_id.clone(),
+                        model: raw.to_string(),
+                    });
+                }
                 // A clearly-foreign selector for a strict direct provider is
                 // rejected. "Clearly foreign" = it carries an aggregator/org
                 // namespace prefix, which a direct provider never expects.
@@ -177,15 +222,46 @@ impl RouteResolver {
                 }
                 // A bare, unknown model on a strict direct provider is passed
                 // through verbatim (the provider validates it server-side).
-                Ok((WireModelId::from(raw), None))
+                Ok((WireModelId::from(raw), None, "chat".to_string()))
             }
             // Aggregators, local runtimes, and custom OpenAI-compatible
             // endpoints legitimately accept arbitrary / prefixed ids verbatim.
             ProviderClass::Aggregator | ProviderClass::LocalOrCustom => {
                 let _ = provider_kind;
-                Ok((WireModelId::from(raw), None))
+                Ok((WireModelId::from(raw), None, "chat".to_string()))
             }
         }
+    }
+
+    fn default_offering(&self, provider_id: &ProviderId) -> Option<&ProviderModelOffering> {
+        self.offerings
+            .iter()
+            .find(|offering| offering.provider == *provider_id && offering.default_for_provider)
+    }
+
+    /// True when `raw` names an offering that lives on a *different* provider.
+    ///
+    /// The `wire_model_id` arm catches the common case (a bare id another
+    /// provider serves). The `canonical_model` arm covers catalog rows whose
+    /// canonical id is slash-free: Models.dev canonical ids normally contain a
+    /// namespace (`zhipuai/glm-5.2`) and are already caught by the
+    /// `namespace_hint()` guard at the call site, but a bare canonical id (or a
+    /// hand-authored offering) would slip through wire-id matching alone. It is
+    /// kept deliberately so a bare canonical selector cannot masquerade as a
+    /// pass-through model on the wrong provider.
+    fn selector_matches_other_provider_offering(
+        &self,
+        provider_id: &ProviderId,
+        raw: &str,
+    ) -> bool {
+        self.offerings.iter().any(|offering| {
+            offering.provider != *provider_id
+                && (offering.wire_model_id.as_str() == raw
+                    || offering
+                        .canonical_model
+                        .as_ref()
+                        .is_some_and(|model| model.as_str() == raw))
+        })
     }
 }
 

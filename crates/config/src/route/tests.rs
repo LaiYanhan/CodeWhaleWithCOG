@@ -6,6 +6,7 @@ use super::errors::RouteError;
 use super::ids::{LogicalModelRef, ModelId, NamespaceHint, ProviderId, WireModelId};
 use super::resolver::{RouteRequest, RouteResolver};
 use crate::ProviderKind;
+use crate::models_dev::ModelsDevCatalog;
 
 /// Build a request with only an explicit provider + a model selector string.
 fn req(provider: Option<ProviderKind>, model: Option<&str>) -> RouteRequest {
@@ -15,6 +16,42 @@ fn req(provider: Option<ProviderKind>, model: Option<&str>) -> RouteRequest {
         saved_provider_model: None,
         base_url_override: None,
     }
+}
+
+fn models_dev_route_resolver() -> RouteResolver {
+    let raw = r#"{
+      "providers": {
+        "zai": {
+          "models": {
+            "glm-5.2": {
+              "id": "glm-5.2",
+              "base_model": "zhipuai/glm-5.2",
+              "default": true,
+              "modalities": { "input": ["text"], "output": ["text"] }
+            }
+          }
+        },
+        "openrouter": {
+          "models": {
+            "z-ai/glm-5.2": {
+              "id": "z-ai/glm-5.2",
+              "base_model": "zhipuai/glm-5.2",
+              "modalities": { "input": ["text"], "output": ["text"] }
+            }
+          }
+        }
+      }
+    }"#;
+    let catalog = ModelsDevCatalog::parse_json(raw).expect("Models.dev fixture parses");
+    let mut offerings = catalog
+        .provider_offerings("zai")
+        .expect("zai provider offerings");
+    offerings.extend(
+        catalog
+            .provider_offerings("openrouter")
+            .expect("openrouter provider offerings"),
+    );
+    RouteResolver::from_offerings(offerings)
 }
 
 #[test]
@@ -221,6 +258,96 @@ fn resolver_auto_is_sentinel_not_literal_model() {
 }
 
 #[test]
+fn resolver_can_use_models_dev_offering_for_provider_scoped_route() {
+    let r = models_dev_route_resolver();
+    let out = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("glm-5.2")))
+        .expect("Models.dev-backed Z.ai route should resolve");
+
+    assert_eq!(out.provider_kind, ProviderKind::Zai);
+    assert_eq!(out.provider_id.as_str(), "zai");
+    assert_eq!(out.wire_model_id.as_str(), "glm-5.2");
+    assert_eq!(
+        out.canonical_model.as_ref().map(ModelId::as_str),
+        Some("zhipuai/glm-5.2")
+    );
+}
+
+#[test]
+fn resolver_auto_uses_models_dev_default_offering_when_available() {
+    let r = models_dev_route_resolver();
+    let out = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("auto")))
+        .expect("auto should resolve through catalog default");
+
+    assert!(out.logical_model.is_auto());
+    assert_eq!(
+        out.wire_model_id.as_str(),
+        "glm-5.2",
+        "catalog default should win over the built-in Z.ai spelling"
+    );
+    assert_eq!(
+        out.canonical_model.as_ref().map(ModelId::as_str),
+        Some("zhipuai/glm-5.2")
+    );
+}
+
+#[test]
+fn resolver_auto_falls_back_to_descriptor_default_without_catalog_default() {
+    // Z.ai offerings exist in the catalog snapshot but none is marked
+    // `default: true`. `auto` must then fall back to the provider descriptor's
+    // built-in default wire model rather than picking an arbitrary catalog row.
+    let raw = r#"{
+      "providers": {
+        "zai": {
+          "models": {
+            "glm-5-turbo": {
+              "id": "glm-5-turbo",
+              "modalities": { "input": ["text"], "output": ["text"] }
+            }
+          }
+        }
+      }
+    }"#;
+    let catalog = ModelsDevCatalog::parse_json(raw).expect("Models.dev fixture parses");
+    let offerings = catalog
+        .provider_offerings("zai")
+        .expect("zai provider offerings");
+    let r = RouteResolver::from_offerings(offerings);
+
+    let out = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("auto")))
+        .expect("auto should resolve to the descriptor default");
+
+    assert!(out.logical_model.is_auto());
+    assert_eq!(
+        out.wire_model_id.as_str(),
+        "GLM-5.2",
+        "no catalog default → descriptor built-in default wins"
+    );
+    assert_eq!(
+        out.canonical_model, None,
+        "descriptor fallback carries no catalog canonical link"
+    );
+}
+
+#[test]
+fn resolver_models_dev_prefixed_wire_id_stays_inside_provider_scope() {
+    let r = models_dev_route_resolver();
+    let out = r
+        .resolve(&req(Some(ProviderKind::Openrouter), Some("z-ai/glm-5.2")))
+        .expect("OpenRouter Models.dev row should resolve");
+
+    assert_eq!(out.provider_kind, ProviderKind::Openrouter);
+    assert_ne!(out.provider_kind, ProviderKind::Zai);
+    assert_eq!(out.wire_model_id.as_str(), "z-ai/glm-5.2");
+    assert_eq!(
+        out.canonical_model.as_ref().map(ModelId::as_str),
+        Some("zhipuai/glm-5.2")
+    );
+}
+
+#[test]
 fn resolver_strict_direct_rejects_clearly_foreign_selector() {
     let r = RouteResolver::new();
     let out = r.resolve(&req(Some(ProviderKind::Zai), Some("anthropic/claude-foo")));
@@ -228,6 +355,32 @@ fn resolver_strict_direct_rejects_clearly_foreign_selector() {
         Err(RouteError::ForeignModelForDirectProvider { provider, model }) => {
             assert_eq!(provider.as_str(), "zai");
             assert_eq!(model, "anthropic/claude-foo");
+        }
+        other => panic!("expected ForeignModelForDirectProvider, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolver_strict_direct_rejects_other_provider_known_bare_offering() {
+    let r = RouteResolver::new();
+    let out = r.resolve(&req(Some(ProviderKind::Zai), Some("deepseek-v4-pro")));
+    match out {
+        Err(RouteError::ForeignModelForDirectProvider { provider, model }) => {
+            assert_eq!(provider.as_str(), "zai");
+            assert_eq!(model, "deepseek-v4-pro");
+        }
+        other => panic!("expected ForeignModelForDirectProvider, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolver_strict_direct_rejects_models_dev_offering_from_another_provider() {
+    let r = models_dev_route_resolver();
+    let out = r.resolve(&req(Some(ProviderKind::Deepseek), Some("glm-5.2")));
+    match out {
+        Err(RouteError::ForeignModelForDirectProvider { provider, model }) => {
+            assert_eq!(provider.as_str(), "deepseek");
+            assert_eq!(model, "glm-5.2");
         }
         other => panic!("expected ForeignModelForDirectProvider, got {other:?}"),
     }
