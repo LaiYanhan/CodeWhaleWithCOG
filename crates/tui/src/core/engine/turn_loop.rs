@@ -1604,9 +1604,18 @@ impl Engine {
                     if let Some(decision) = ask_rule_decision {
                         match decision {
                             ToolAskRuleDecision::Prompt(reason) => {
-                                approval_required = true;
-                                approval_description = reason;
-                                approval_force_prompt = true;
+                                // YOLO mode (auto_approve) is the explicit
+                                // "no approvals" contract: a typed ask-rule
+                                // must not pop a modal in YOLO. The
+                                // auto_review safety floor below still
+                                // independently holds publish/destructive
+                                // actions, and a typed deny rule still
+                                // blocks hard.
+                                if !self.session.auto_approve {
+                                    approval_required = true;
+                                    approval_description = reason;
+                                    approval_force_prompt = true;
+                                }
                             }
                             ToolAskRuleDecision::Block(reason) => {
                                 approval_required = false;

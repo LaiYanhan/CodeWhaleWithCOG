@@ -1087,9 +1087,14 @@ impl Engine {
                 self.session.approval_mode,
             );
             if let Some(ToolAskRuleDecision::Prompt(reason)) = ask_rule_decision.as_ref() {
-                approval_required = true;
-                approval_description = reason.clone();
-                approval_force_prompt = true;
+                // YOLO mode (auto_approve) is the explicit "no approvals"
+                // contract: a typed ask-rule must not pop a modal in YOLO.
+                // A typed deny rule still blocks hard below.
+                if !self.session.auto_approve {
+                    approval_required = true;
+                    approval_description = reason.clone();
+                    approval_force_prompt = true;
+                }
             }
             if let Some(ToolAskRuleDecision::Block(reason)) = ask_rule_decision {
                 Err(ToolError::permission_denied(reason))
