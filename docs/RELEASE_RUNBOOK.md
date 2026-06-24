@@ -140,15 +140,25 @@ Crate publishing to crates.io is **manual** — there is no automated
 `scripts/release/` from a developer workstation that has `cargo login`
 configured.
 
+Release commits must land on `main` before any `vX.Y.Z` tag is pushed. Do not
+tag a release-only branch. Open the release PR against `main`, let required
+review and CI finish, merge it, then tag the commit that is reachable from
+`main` or let `auto-tag.yml` create that tag after the version bump reaches
+`main`. This is what lets GitHub process `Closes #N` lines automatically and
+show the release PR as merged. The tag release workflow runs
+`scripts/release/ensure-release-on-main.sh` and fails branch-only tags before
+assets are published.
+
 1. Write the CHANGELOG entry, then run
    `./scripts/release/prepare-release.sh X.Y.Z` — it bumps every
    version-bearing file (workspace + crate pins + npm wrapper + README
    install tags), refreshes the lockfile and generated files, and runs
    `check-versions.sh`.
 2. Run `./scripts/release/publish-crates.sh dry-run` locally; it must be clean.
-3. Tag the release as `vX.Y.Z` (typically by pushing the version bump to
-   `main` and letting `auto-tag.yml` create the tag — see the npm wrapper
-   release section below for the `RELEASE_TAG_PAT` requirement).
+3. Merge the release PR into `main` before tagging. The normal path is to push
+   the version bump PR to `main` and let `auto-tag.yml` create `vX.Y.Z` from the
+   main commit; see the npm wrapper release section below for the
+   `RELEASE_TAG_PAT` requirement.
 4. Publish crates in this order with `./scripts/release/publish-crates.sh publish`:
    - `codewhale-mcp`
    - `codewhale-protocol`

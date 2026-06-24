@@ -72,6 +72,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Require release source on main
+        if: github.event_name == 'push'
+        run: ./scripts/release/ensure-release-on-main.sh "${GITHUB_SHA}"
       - name: Resolve release source
         id: release
         shell: bash
