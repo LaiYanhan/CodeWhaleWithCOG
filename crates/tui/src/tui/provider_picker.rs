@@ -27,6 +27,7 @@ use ratatui::{
 };
 
 use crate::config::{ApiProvider, Config, has_api_key_for, kimi_cli_credentials_present};
+use crate::model_profile::{SupportState, resolved_capability_profile};
 use crate::palette;
 use crate::tui::app::ReasoningEffort;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
@@ -65,6 +66,8 @@ pub struct ProviderDashboardRow {
     pub default_route: ProviderDefaultRoute,
     pub usage_meter: String,
     pub reasoning: ProviderReasoningSummary,
+    pub capabilities: ProviderCapabilityBadges,
+    pub model_origin: ProviderModelOrigin,
     pub readiness: ProviderReadiness,
     pub maturity: ProviderMaturity,
     pub messages: Vec<String>,
@@ -135,6 +138,108 @@ impl ProviderMaturity {
     }
 }
 
+/// Where the row's current model came from, so the dashboard can distinguish a
+/// provider default from a saved override or a custom pass-through id (#3083).
+/// Live-catalog/static origins are not yet distinguishable here; they arrive
+/// with the #3385 live-fetch layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderModelOrigin {
+    Default,
+    Saved,
+    Custom,
+}
+
+impl ProviderModelOrigin {
+    fn for_provider(provider: ApiProvider, has_saved_model: bool) -> Self {
+        if has_saved_model {
+            Self::Saved
+        } else if provider == ApiProvider::Custom {
+            Self::Custom
+        } else {
+            Self::Default
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Saved => "saved",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+/// Capability + metadata badges projected from the resolved capability profile
+/// (#3083). Tri-state so "unknown" stays distinct from "unsupported"; metadata
+/// is `None` when not resolvable. Reasoning is tracked separately in
+/// [`ProviderReasoningSummary`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCapabilityBadges {
+    pub context_window: Option<u32>,
+    pub max_output: Option<u32>,
+    pub tools: SupportState,
+    pub structured: SupportState,
+    pub streaming: SupportState,
+    pub cache: SupportState,
+}
+
+impl ProviderCapabilityBadges {
+    fn for_route(provider: ApiProvider, wire_model: &str) -> Self {
+        let cap = resolved_capability_profile(provider, wire_model);
+        Self {
+            context_window: cap.context_window,
+            max_output: cap.max_output,
+            tools: cap.native_tool_calls,
+            structured: cap.structured_output,
+            streaming: cap.streaming,
+            cache: cap.prompt_caching,
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            context_window: None,
+            max_output: None,
+            tools: SupportState::Unknown,
+            structured: SupportState::Unknown,
+            streaming: SupportState::Unknown,
+            cache: SupportState::Unknown,
+        }
+    }
+
+    /// Compact, never-fabricating badge cluster. Metadata and each capability
+    /// render `?` when unknown rather than being silently dropped.
+    fn label(&self) -> String {
+        format!(
+            "ctx:{} out:{} tools:{} json:{} stream:{} cache:{}",
+            humanize_token_count(self.context_window),
+            humanize_token_count(self.max_output),
+            support_glyph(self.tools),
+            support_glyph(self.structured),
+            support_glyph(self.streaming),
+            support_glyph(self.cache),
+        )
+    }
+}
+
+fn support_glyph(state: SupportState) -> &'static str {
+    match state {
+        SupportState::Supported => "y",
+        SupportState::Unsupported => "n",
+        SupportState::Unknown => "?",
+    }
+}
+
+fn humanize_token_count(value: Option<u32>) -> String {
+    match value {
+        None => "?".to_string(),
+        Some(v) if v >= 1_000_000 && v % 1_000_000 == 0 => format!("{}M", v / 1_000_000),
+        Some(v) if v >= 1_000_000 => format!("{:.1}M", f64::from(v) / 1_000_000.0),
+        Some(v) if v >= 1_000 => format!("{}K", v / 1_000),
+        Some(v) => v.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderReasoningSummary {
     pub support: ProviderReasoningSupport,
@@ -173,6 +278,8 @@ impl ProviderDashboardRow {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let has_configured_model = configured_model.is_some();
+        let model_origin = ProviderModelOrigin::for_provider(provider, has_configured_model);
         let auth_status = auth_status_for(provider, has_key, configured);
         let usage_meter = usage_meter_for(provider);
 
@@ -195,6 +302,8 @@ impl ProviderDashboardRow {
                 },
                 usage_meter,
                 reasoning: ProviderReasoningSummary::unknown(provider, config),
+                capabilities: ProviderCapabilityBadges::unknown(),
+                model_origin,
                 readiness: ProviderReadiness::Legacy,
                 maturity: ProviderMaturity::for_provider(provider),
                 messages: vec![
@@ -275,6 +384,7 @@ impl ProviderDashboardRow {
 
         let readiness = readiness_for(provider, auth_status, route_ok);
         let reasoning = ProviderReasoningSummary::for_route(provider, &default_route, config);
+        let capabilities = ProviderCapabilityBadges::for_route(provider, &default_route.wire_model);
 
         Self {
             provider,
@@ -289,6 +399,8 @@ impl ProviderDashboardRow {
             default_route,
             usage_meter: resolved_pricing,
             reasoning,
+            capabilities,
+            model_origin,
             readiness,
             maturity: ProviderMaturity::for_provider(provider),
             messages,
@@ -298,15 +410,25 @@ impl ProviderDashboardRow {
     }
 
     fn compact_hint(&self) -> String {
+        // Self-hosted providers carry a local/private posture; surface it next
+        // to the base URL so the row reads correctly without a key (#3083).
+        let self_hosted = if self.auth_status == ProviderAuthStatus::Local {
+            " (self-hosted)"
+        } else {
+            ""
+        };
         format!(
-            "{} | auth:{} | {} | {} | base:{} | route:{}{} | {} | catalog:{}{}",
+            "{} | auth:{} | {} | {} | base:{}{} | route:{}{} origin:{} | {} | {} | catalog:{}{}",
             self.readiness.label(),
             self.auth_status.label(),
             self.usage_meter,
             self.supported_protocols.join("+"),
             compact_base_url(&self.base_url),
+            self_hosted,
             self.default_route.logical_model,
             route_wire_suffix(&self.default_route),
+            self.model_origin.label(),
+            self.capabilities.label(),
             self.reasoning.label(),
             self.catalog_label(),
             // Only experimental integrations add a tag; supported ones stay
@@ -1395,6 +1517,117 @@ mod tests {
             row.compact_hint()
                 .contains("reasoning:low/medium/high/xhigh")
         );
+    }
+
+    #[test]
+    fn provider_dashboard_row_surfaces_capability_and_metadata_badges() {
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek: crate::config::ProviderConfig {
+                    api_key: Some("deepseek-key".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let row = ProviderDashboardRow::from_config(
+            ApiProvider::Deepseek,
+            ApiProvider::Deepseek,
+            &config,
+        );
+
+        // Metadata badges are projected from the resolved capability profile,
+        // never hardcoded per UI surface.
+        assert!(row.capabilities.context_window.is_some());
+        assert!(row.capabilities.max_output.is_some());
+        let hint = row.compact_hint();
+        assert!(hint.contains("ctx:"), "metadata badge missing: {hint}");
+        assert!(hint.contains("out:"), "metadata badge missing: {hint}");
+        // Capability cluster present (tri-state; unknown renders `?`, never
+        // silently omitted).
+        for badge in ["tools:", "json:", "stream:", "cache:"] {
+            assert!(
+                hint.contains(badge),
+                "capability badge {badge} missing: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_dashboard_row_classifies_model_origin() {
+        // Default: no configured model override.
+        let config = Config::default();
+        let row = ProviderDashboardRow::from_config(
+            ApiProvider::Deepseek,
+            ApiProvider::Deepseek,
+            &config,
+        );
+        assert_eq!(row.model_origin, ProviderModelOrigin::Default);
+        assert!(row.compact_hint().contains("origin:default"));
+
+        // Saved: a configured model override for the provider.
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek: crate::config::ProviderConfig {
+                    api_key: Some("k".to_string()),
+                    model: Some("deepseek-v4-flash".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        let row = ProviderDashboardRow::from_config(
+            ApiProvider::Deepseek,
+            ApiProvider::Deepseek,
+            &config,
+        );
+        assert_eq!(row.model_origin, ProviderModelOrigin::Saved);
+        assert!(row.compact_hint().contains("origin:saved"));
+    }
+
+    #[test]
+    fn model_origin_classifier_covers_default_saved_custom() {
+        assert_eq!(
+            ProviderModelOrigin::for_provider(ApiProvider::Deepseek, false),
+            ProviderModelOrigin::Default
+        );
+        assert_eq!(
+            ProviderModelOrigin::for_provider(ApiProvider::Deepseek, true),
+            ProviderModelOrigin::Saved
+        );
+        assert_eq!(
+            ProviderModelOrigin::for_provider(ApiProvider::Custom, false),
+            ProviderModelOrigin::Custom
+        );
+        // An explicit saved model still wins for a custom provider.
+        assert_eq!(
+            ProviderModelOrigin::for_provider(ApiProvider::Custom, true),
+            ProviderModelOrigin::Saved
+        );
+    }
+
+    #[test]
+    fn self_hosted_provider_row_marks_self_hosted_in_hint() {
+        let config = Config::default();
+        let row =
+            ProviderDashboardRow::from_config(ApiProvider::Ollama, ApiProvider::Ollama, &config);
+        assert_eq!(row.auth_status, ProviderAuthStatus::Local);
+        assert!(
+            row.compact_hint().contains("(self-hosted)"),
+            "self-hosted hint missing: {}",
+            row.compact_hint()
+        );
+    }
+
+    #[test]
+    fn humanize_token_count_is_compact_and_marks_unknown() {
+        assert_eq!(humanize_token_count(None), "?");
+        assert_eq!(humanize_token_count(Some(1_000_000)), "1M");
+        assert_eq!(humanize_token_count(Some(1_500_000)), "1.5M");
+        assert_eq!(humanize_token_count(Some(131_072)), "131K");
+        assert_eq!(humanize_token_count(Some(512)), "512");
     }
 
     #[test]
