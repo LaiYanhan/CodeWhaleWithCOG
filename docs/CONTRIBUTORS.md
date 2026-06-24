@@ -379,6 +379,15 @@ was dropped. Restoring them here — every one shipped real code:_
 Additional harvested PRs from the same audit, credited to contributors already
 listed above: **[axobase001](https://github.com/axobase001)** (#2400, #2405, #2406, #2407, #2408, #2415), **[cyq1017](https://github.com/cyq1017)** (#2516, #2534, #2540), **[Oliver-ZPLiu](https://github.com/Oliver-ZPLiu)** (#1451, #1456), **[reidliu41](https://github.com/reidliu41)** (#1444, #1493), **[lucaszhu-hue](https://github.com/lucaszhu-hue)** (#1436, #2343), **[h3c-hexin](https://github.com/h3c-hexin)** (#1480), **[Duducoco](https://github.com/Duducoco)** (#1345), **[zhuangbiaowei](https://github.com/zhuangbiaowei)** (#1416), **[wdw8276](https://github.com/wdw8276)** (#1498), and **[buko](https://github.com/buko)** (#2377).
 
+_A further machine-credit pass restored these contributors, missing from both the
+list above and the contribution graph (AUTHOR_MAP entries added; logins/IDs
+verified against the GitHub user API) — every one shipped real code:_
+
+- **[1Git2Clone](https://github.com/1Git2Clone)** — `Ctrl+P`/`Ctrl+N` slash-menu navigation
+- **[rockeverm3m](https://github.com/rockeverm3m)** — community ACP adapter reference in the docs
+- **[hxy91819](https://github.com/hxy91819)** — stable MCP tool ordering for prefix-cache stability (#1319)
+- **[heloanc](https://github.com/heloanc)** — Home/End keys moving the cursor in the input box (#1246)
+
 </details>
 
 ---

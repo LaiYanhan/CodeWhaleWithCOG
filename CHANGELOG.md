@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all seven shipped locales (model-facing mode labels stay English). Harvested
   from #2239 by @gordonlu.
 
+### Changed
+
+- **Restored contributor credit.** Threaded machine-readable credit
+  (`docs/CONTRIBUTORS.md` + `.github/AUTHOR_MAP`) for earlier merged work that
+  shipped without it, including the `/jobs cancel-all` action and the npm
+  retry-timeout hint (#1538) by @jieshu666, and the community ACP adapter
+  reference by @rockeverm3m.
+
 ## [0.8.64] - 2026-06-22
 
 ### Added
