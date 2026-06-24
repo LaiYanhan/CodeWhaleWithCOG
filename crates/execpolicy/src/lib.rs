@@ -509,7 +509,13 @@ fn first_token(command: &str) -> String {
 /// must have the workspace as a whole-component prefix; relative paths are
 /// interpreted as workspace-relative. Backslashes are accepted so persisted
 /// rules and tool inputs behave consistently on Windows.
-fn normalize_workspace_relative_path(value: &str, workspace_root: &str) -> Option<String> {
+///
+/// This is the canonical normalization shared by ask-rule matching and rule
+/// persistence: callers that save a file ask rule should store the value this
+/// returns so the saved path matches the same invocation later. `None` means
+/// the path is empty, traversing, drive-relative, or outside the workspace and
+/// must not be turned into a rule.
+pub fn normalize_workspace_relative_path(value: &str, workspace_root: &str) -> Option<String> {
     let path = parse_path_for_matching(value)?;
     let workspace = parse_path_for_matching(workspace_root)?;
     let workspace_root = workspace.root.as_ref()?;

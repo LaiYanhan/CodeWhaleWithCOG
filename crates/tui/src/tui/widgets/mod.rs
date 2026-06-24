@@ -4668,6 +4668,7 @@ mod tests {
             }),
             "exec_shell:cargo",
             Some("Need to verify the fallback build path before editing files."),
+            std::path::Path::new("/tmp/project"),
         );
         let view = crate::tui::approval::ApprovalView::new(request.clone());
         let widget = ApprovalWidget::new(&request, &view);

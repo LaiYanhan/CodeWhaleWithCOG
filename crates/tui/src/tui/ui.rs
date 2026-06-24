@@ -9172,6 +9172,7 @@ fn push_approval_request_view(
         tool_input,
         approval_key,
         intent_summary,
+        &app.workspace,
     );
     app.view_stack
         .push(ApprovalView::new_for_locale(request, app.ui_locale));

@@ -162,7 +162,15 @@ impl ApprovalRequest {
         params: &Value,
         approval_key: &str,
     ) -> Self {
-        Self::new_with_intent(id, tool_name, description, params, approval_key, None)
+        Self::new_with_intent(
+            id,
+            tool_name,
+            description,
+            params,
+            approval_key,
+            None,
+            Path::new("/workspace"),
+        )
     }
 
     pub fn new_with_intent(
@@ -172,6 +180,7 @@ impl ApprovalRequest {
         params: &Value,
         approval_key: &str,
         intent_summary: Option<&str>,
+        workspace: &Path,
     ) -> Self {
         let category = get_tool_category(tool_name);
         let risk = classify_risk(tool_name, category, params);
@@ -196,7 +205,7 @@ impl ApprovalRequest {
                     Some(summary.to_string())
                 }
             }),
-            persistent_ask_rules: build_persistent_ask_rules(tool_name, params),
+            persistent_ask_rules: build_persistent_ask_rules(tool_name, params, workspace),
         }
     }
 
@@ -252,10 +261,23 @@ impl ApprovalRequest {
 }
 
 #[must_use]
-fn build_persistent_ask_rules(tool_name: &str, params: &Value) -> Vec<ToolAskRule> {
-    if tool_name != "exec_shell" {
-        return Vec::new();
+fn build_persistent_ask_rules(
+    tool_name: &str,
+    params: &Value,
+    workspace: &Path,
+) -> Vec<ToolAskRule> {
+    match tool_name {
+        "exec_shell" => build_exec_shell_ask_rules(params),
+        // File writes save an exact, workspace-relative path so a later
+        // edit/write of the same file is matched. read_file stays out: this
+        // boundary is about persisting *write* approvals only.
+        "write_file" | "edit_file" => build_file_write_ask_rules(tool_name, params, workspace),
+        _ => Vec::new(),
     }
+}
+
+#[must_use]
+fn build_exec_shell_ask_rules(params: &Value) -> Vec<ToolAskRule> {
     let Some(command) = params
         .get("command")
         .and_then(Value::as_str)
@@ -265,6 +287,35 @@ fn build_persistent_ask_rules(tool_name: &str, params: &Value) -> Vec<ToolAskRul
         return Vec::new();
     };
     vec![ToolAskRule::exec_shell(command)]
+}
+
+#[must_use]
+fn build_file_write_ask_rules(
+    tool_name: &str,
+    params: &Value,
+    workspace: &Path,
+) -> Vec<ToolAskRule> {
+    let Some(path) = params
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Vec::new();
+    };
+    // Reuse the canonical matcher normalization so the saved rule equals what
+    // runtime matching compares against. `None` (and the degenerate
+    // workspace-root case) means the path is empty, traversing, drive-relative,
+    // or outside the workspace, so we save nothing and the `S` shortcut and
+    // preview stay disabled.
+    let workspace = workspace.to_string_lossy();
+    let Some(relative) =
+        codewhale_execpolicy::normalize_workspace_relative_path(path, workspace.as_ref())
+            .filter(|relative| !relative.is_empty())
+    else {
+        return Vec::new();
+    };
+    vec![ToolAskRule::file_path(tool_name, relative)]
 }
 
 /// Get the category for a tool by name
@@ -1634,11 +1685,70 @@ mod tests {
     }
 
     #[test]
-    fn non_shell_request_has_no_persistent_ask_rules() {
+    fn file_ask_rule_saved_for_write_file_approval() {
+        // A write_file approval offers an exact, workspace-relative file rule
+        // plus a preview so `S` can persist it.
         let request = destructive_request();
 
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("write_file", "src/main.rs")]
+        );
+        assert!(request.can_save_ask_rule());
+        let preview = request.ask_rule_preview().expect("preview");
+        assert!(preview.contains("[[rules]]"));
+        assert!(preview.contains("tool = \"write_file\""));
+        assert!(preview.contains("path = \"src/main.rs\""));
+    }
+
+    #[test]
+    fn file_ask_rule_normalizes_absolute_edit_file_path_to_workspace_relative() {
+        // An absolute in-workspace path is stored in the workspace-relative
+        // form, matching how runtime ask-rule matching normalizes paths.
+        let request = ApprovalRequest::new(
+            "test-id",
+            "edit_file",
+            "Edit a file on disk",
+            &json!({"path": "/workspace/src/lib.rs"}),
+            "tool:edit_file",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("edit_file", "src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn read_file_request_has_no_file_ask_rule() {
+        // The save boundary is write approvals only; read_file never offers a
+        // persistent rule.
+        let request = benign_request();
+
         assert!(request.persistent_ask_rules.is_empty());
+        assert!(!request.can_save_ask_rule());
         assert_eq!(request.ask_rule_preview(), None);
+    }
+
+    #[test]
+    fn file_ask_rule_skipped_for_unsafe_empty_or_external_paths() {
+        // Traversal, empty, and outside-workspace paths must not become rules,
+        // so the preview and `S` shortcut stay disabled.
+        for path in ["../escape.rs", "/etc/passwd", "   ", ""] {
+            let request = ApprovalRequest::new(
+                "test-id",
+                "write_file",
+                "Write a file to disk",
+                &json!({"path": path}),
+                "tool:write_file",
+            );
+            assert!(
+                request.persistent_ask_rules.is_empty(),
+                "path {path:?} must not produce a rule"
+            );
+            assert!(!request.can_save_ask_rule());
+            assert_eq!(request.ask_rule_preview(), None);
+        }
     }
 
     #[test]
@@ -1719,6 +1829,29 @@ mod tests {
         assert_eq!(
             persistent_ask_rules,
             vec![ToolAskRule::exec_shell("cargo test --workspace")]
+        );
+    }
+
+    #[test]
+    fn save_file_ask_rule_shortcut_emits_file_rule() {
+        // `S` on a write_file approval approves once and carries the exact
+        // workspace-relative file rule for persistence.
+        let mut view = ApprovalView::new(destructive_request());
+
+        let action = view.handle_key(create_key_event(KeyCode::Char('S')));
+        let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+            decision,
+            persistent_ask_rules,
+            ..
+        }) = action
+        else {
+            panic!("expected approval decision");
+        };
+
+        assert_eq!(decision, ReviewDecision::Approved);
+        assert_eq!(
+            persistent_ask_rules,
+            vec![ToolAskRule::file_path("write_file", "src/main.rs")]
         );
     }
 
