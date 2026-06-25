@@ -140,4 +140,34 @@ fn contrast_guardrails_for_key_ui_pairs() {
         palette::DEEPSEEK_INK,
         min_readable,
     );
+    assert_min_contrast(
+        "SELECTION_TEXT on SELECTION_BG",
+        palette::SELECTION_TEXT,
+        palette::SELECTION_BG,
+        min_readable,
+    );
+    assert_min_contrast(
+        "TEXT_PRIMARY on SURFACE_ELEVATED",
+        palette::TEXT_PRIMARY,
+        palette::SURFACE_ELEVATED,
+        min_readable,
+    );
+    assert_min_contrast(
+        "LIGHT_TEXT_BODY on LIGHT_SURFACE",
+        palette::LIGHT_TEXT_BODY,
+        palette::LIGHT_SURFACE,
+        min_readable,
+    );
+    assert_min_contrast(
+        "LIGHT_TEXT_MUTED on LIGHT_SURFACE",
+        palette::LIGHT_TEXT_MUTED,
+        palette::LIGHT_SURFACE,
+        min_readable,
+    );
+    assert_min_contrast(
+        "LIGHT_TEXT_BODY on LIGHT_SELECTION_BG",
+        palette::LIGHT_TEXT_BODY,
+        palette::LIGHT_SELECTION_BG,
+        min_readable,
+    );
 }

@@ -1033,6 +1033,17 @@ mod tests {
             .find(|&y| buffer_row_text(buf, area, y).contains(needle))
     }
 
+    fn buffer_text(buf: &Buffer, area: Rect) -> String {
+        let mut out = String::new();
+        for y in area.y..area.y.saturating_add(area.height) {
+            for x in area.x..area.x.saturating_add(area.width) {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     #[test]
     fn workspace_scope_filters_sessions_to_current_project() {
         // #1395 reproduction: Ctrl+R in project B must not surface sessions
@@ -1172,6 +1183,78 @@ mod tests {
                 .any(|x| buf[(x, y)].bg == palette::WHALE_ACCENT_PRIMARY),
             "selected /sessions row should not use the bright accent background"
         );
+    }
+
+    #[test]
+    fn session_picker_visual_matrix_covers_narrow_and_medium_rendering() {
+        let base_time = DateTime::parse_from_rfc3339("2026-06-25T10:30:00Z")
+            .expect("visual matrix timestamp")
+            .with_timezone(&Utc);
+        let sessions = (0..12)
+            .map(|idx| {
+                let title = if idx == 6 {
+                    "selected visual matrix target with 中文内容 and suffix that must truncate"
+                } else {
+                    "A very long terminal visual regression session title with 中文内容 and suffix that must truncate"
+                };
+                let mut session = test_session(idx, title);
+                session.id = format!("visual-matrix-{idx:02}");
+                session.created_at = base_time - chrono::Duration::seconds(idx as i64);
+                session.updated_at = session.created_at;
+                session
+            })
+            .collect::<Vec<_>>();
+        let mut view = picker_with(sessions, None);
+        view.selected = view
+            .filtered
+            .iter()
+            .position(|session| session.id == "visual-matrix-06")
+            .expect("visual matrix target session should be filtered");
+        view.ensure_selected_visible();
+        view.current_preview = vec![
+            "Title: terminal visual matrix".to_string(),
+            "Updated: 2026-06-25 10:30".to_string(),
+            "Messages: 3 | Model: deepseek-v4-pro".to_string(),
+            String::new(),
+            "USER: narrow panes should keep long CJK text readable 中文中文中文".to_string(),
+            "ASSISTANT: overlays should keep borders and truncate rows predictably".to_string(),
+        ];
+
+        for (width, height, label) in [(72, 20, "narrow"), (120, 28, "medium")] {
+            let area = Rect::new(0, 0, width, height);
+            let mut buf = Buffer::empty(area);
+
+            view.render(area, &mut buf);
+
+            let dump = buffer_text(&buf, area);
+            assert!(
+                dump.contains("Sessions"),
+                "{label} sessions pane missing:\n{dump}"
+            );
+            assert!(
+                dump.contains("History"),
+                "{label} history pane missing:\n{dump}"
+            );
+            assert!(dump.contains('┌'), "{label} top border missing:\n{dump}");
+            assert!(dump.contains('┘'), "{label} bottom border missing:\n{dump}");
+            assert!(
+                !dump.contains("suffix that must truncate"),
+                "{label} long title tail leaked instead of truncating:\n{dump}"
+            );
+            assert!(
+                dump.contains("..."),
+                "{label} should show an explicit ellipsis for truncated rows:\n{dump}"
+            );
+            assert!(
+                !dump.contains('\u{fffd}'),
+                "{label} render emitted replacement characters:\n{dump}"
+            );
+
+            assert!(
+                row_containing(&buf, area, "selected visual").is_some(),
+                "{label} selected session row missing:\n{dump}"
+            );
+        }
     }
 
     #[test]
