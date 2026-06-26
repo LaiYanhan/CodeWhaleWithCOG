@@ -20,7 +20,9 @@ use ratatui::text::{Line, Span};
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tools::subagent::MailboxMessage;
+use crate::tui::ui_text::truncate_line_to_width;
 use crate::tui::widgets::tool_card::{ToolFamily, family_glyph, family_label};
+use unicode_width::UnicodeWidthStr;
 
 /// Maximum number of recent actions kept on a `DelegateCard`. Older entries
 /// are dropped from the head; an ellipsis row signals truncation.
@@ -108,8 +110,9 @@ impl DelegateCard {
     }
 
     #[must_use]
-    pub fn render_lines(&self, _width: u16) -> Vec<Line<'static>> {
+    pub fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::with_capacity(self.actions.len() + 3);
+        let content_width = usize::from(width);
         let role = readable_agent_role(&self.agent_type);
         let short_id = crate::session_manager::truncate_id(&self.agent_id).to_string();
         let detail = if let Some(ref summary) = self.summary {
@@ -122,6 +125,7 @@ impl DelegateCard {
             self.status,
             &role,
             &detail,
+            content_width,
         ));
         if self.truncated {
             lines.push(Line::from(Span::styled(
@@ -130,10 +134,11 @@ impl DelegateCard {
             )));
         }
         for action in &self.actions {
+            let prefix = "  \u{2502} ";
             lines.push(Line::from(vec![
-                Span::styled("  \u{2502} ", Style::default().fg(palette::TEXT_DIM)),
+                Span::styled(prefix, Style::default().fg(palette::TEXT_DIM)),
                 Span::styled(
-                    truncate_action(action, 200),
+                    truncate_action(action, line_detail_width(content_width, prefix).min(200)),
                     Style::default().fg(palette::TEXT_TOOL_OUTPUT),
                 ),
             ]));
@@ -141,10 +146,11 @@ impl DelegateCard {
         if self.status.is_terminal()
             && let Some(summary) = self.summary.as_ref()
         {
+            let prefix = "  \u{2570} ";
             lines.push(Line::from(vec![
-                Span::styled("  \u{2570} ", Style::default().fg(palette::TEXT_DIM)),
+                Span::styled(prefix, Style::default().fg(palette::TEXT_DIM)),
                 Span::styled(
-                    truncate_action(summary, 200),
+                    truncate_action(summary, line_detail_width(content_width, prefix).min(200)),
                     Style::default().fg(self.status.color()),
                 ),
             ]));
@@ -309,8 +315,9 @@ impl FanoutCard {
     }
 
     #[must_use]
-    pub fn render_lines(&self, _width: u16) -> Vec<Line<'static>> {
+    pub fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::with_capacity(3);
+        let content_width = usize::from(width);
         let header_status = self.aggregate_status();
         let title = format!("{} ({} workers)", self.kind, self.workers.len());
         let family = if matches!(self.kind.as_str(), "rlm_open" | "rlm_eval" | "rlm") {
@@ -318,7 +325,13 @@ impl FanoutCard {
         } else {
             ToolFamily::Fanout
         };
-        lines.push(card_header(family, header_status, &self.kind, &title));
+        lines.push(card_header(
+            family,
+            header_status,
+            &self.kind,
+            &title,
+            content_width,
+        ));
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
@@ -374,13 +387,29 @@ fn card_header(
     status: AgentLifecycle,
     role: &str,
     detail: &str,
+    width: usize,
 ) -> Line<'static> {
     let glyph = family_glyph(family);
     let verb = family_label(family);
     let header_color = status.color();
+    let glyph_text = format!("{glyph} ");
+    let status_text = format!("[{}]", status.label());
+    let fixed_width = [
+        glyph_text.as_str(),
+        verb,
+        " ",
+        role,
+        " ",
+        status_text.as_str(),
+        " ",
+    ]
+    .iter()
+    .map(|text| UnicodeWidthStr::width(*text))
+    .sum::<usize>();
+    let detail = truncate_action(detail, width.saturating_sub(fixed_width));
     Line::from(vec![
         Span::styled(
-            format!("{glyph} "),
+            glyph_text,
             Style::default()
                 .fg(header_color)
                 .add_modifier(Modifier::BOLD),
@@ -394,12 +423,9 @@ fn card_header(
         Span::raw(" "),
         Span::styled(role.to_string(), Style::default().fg(palette::TEXT_PRIMARY)),
         Span::raw(" "),
-        Span::styled(
-            format!("[{}]", status.label()),
-            Style::default().fg(header_color),
-        ),
+        Span::styled(status_text, Style::default().fg(header_color)),
         Span::raw(" "),
-        Span::styled(detail.to_string(), Style::default().fg(palette::TEXT_MUTED)),
+        Span::styled(detail, Style::default().fg(palette::TEXT_MUTED)),
     ])
 }
 
@@ -418,14 +444,11 @@ fn readable_agent_role(agent_type: &str) -> String {
 }
 
 fn truncate_action(text: &str, max: usize) -> String {
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= max {
-        trimmed.to_string()
-    } else {
-        let mut out: String = trimmed.chars().take(max.saturating_sub(1)).collect();
-        out.push('\u{2026}');
-        out
-    }
+    truncate_line_to_width(text.trim(), max)
+}
+
+fn line_detail_width(line_width: usize, prefix: &str) -> usize {
+    line_width.saturating_sub(UnicodeWidthStr::width(prefix))
 }
 
 /// Apply a mailbox envelope to a `DelegateCard`. Returns `true` if the
@@ -525,6 +548,7 @@ pub fn apply_to_fanout(card: &mut FanoutCard, msg: &MailboxMessage) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     fn render_to_strings(lines: &[Line<'static>]) -> Vec<String> {
         lines
@@ -536,6 +560,27 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn delegate_card_cjk_text_respects_render_width() {
+        let mut card = DelegateCard::new("agent_e0b2dcf1", "implementer");
+        card.status = AgentLifecycle::Running;
+        card.summary = Some(
+            "抹香鲸 agent_e0b2dcf1 running 10+ 124838ms role: implementer git: branch codex/issue-3439-zhipu-glm-fixture @ issue-3439".into(),
+        );
+        card.push_action("objective: QUESTION: Add Zhipu GLM as a first-class provider-scoped route for 中文输出".to_string());
+
+        let rendered = render_to_strings(&card.render_lines(40));
+
+        assert!(
+            rendered[0].contains("builder") && rendered[0].contains("[running]"),
+            "header keeps fixed status columns visible: {rendered:?}"
+        );
+        for line in rendered {
+            let width = UnicodeWidthStr::width(line.as_str());
+            assert!(width <= 40, "line width {width} exceeds 40: {line:?}");
+        }
     }
 
     #[test]
