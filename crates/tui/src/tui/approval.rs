@@ -2547,12 +2547,22 @@ mod tests {
         lines.join("\n").replace(' ', "")
     }
 
+    fn assert_approval_key_badges_visible(joined: &str) {
+        for badge in ["[1 / y]", "[2 / a]", "[3 / d / n]", "[Esc]"] {
+            assert!(
+                joined.contains(badge),
+                "missing key badge {badge}:\n{joined}"
+            );
+        }
+    }
+
     #[test]
     fn render_benign_includes_review_badge_and_selection_hint() {
         let view = ApprovalView::new(benign_request());
         let lines = render_lines(&view, 100, 40);
         let joined = lines.join("\n");
         assert!(joined.contains("REVIEW"), "missing REVIEW badge:\n{joined}");
+        assert_approval_key_badges_visible(&joined);
         assert!(joined.contains("Choose"), "benign hint missing:\n{joined}");
         assert!(
             joined.contains("Enter selected option"),
@@ -2570,6 +2580,7 @@ mod tests {
             joined.contains("DESTRUCTIVE"),
             "missing DESTRUCTIVE badge:\n{joined}"
         );
+        assert_approval_key_badges_visible(&joined);
         assert!(
             joined.contains("Enter selected option"),
             "destructive hint missing:\n{joined}"
