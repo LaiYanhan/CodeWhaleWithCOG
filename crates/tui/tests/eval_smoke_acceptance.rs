@@ -1,7 +1,7 @@
 //! Gherkin acceptance test: eval smoke test.
 //!
 //! Verifies that the binary loads and the eval harness reports step-level
-//! success for a shell command after Layer 4.4 registry cleanup. Follows the
+//! success for a shell command after Layer 4.2 registry cleanup. Follows the
 //! proven `core_session_command_extraction.rs` pattern.
 //!
 //! NOTE: This is an eval smoke test, not a command-surface verification

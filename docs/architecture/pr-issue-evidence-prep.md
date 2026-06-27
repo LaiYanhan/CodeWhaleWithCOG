@@ -14,11 +14,9 @@ tree by running the documented commands.
 
 ### PR References
 
-- Layer 4.0 (FEAT-004): Command extraction contract and baseline
-- Layer 4.1 (FEAT-005): Core and session command extraction
-- Layer 4.2 (FEAT-006): Config and debug command extraction
-- Layer 4.3 (FEAT-007): Project, memory, skills, and utility extraction
-- Layer 4.4 (FEAT-008): Registry cleanup, documentation, and full validation
+- Layer 4 (FEAT-006): Core, config, session, and debug command extraction
+- Layer 4.1 (FEAT-007): Project, memory, skills, utility, and plugins extraction
+- Layer 4.2 (FEAT-008): Registry cleanup, documentation, and full validation
 
 ### Acceptance Evidence
 
@@ -64,7 +62,7 @@ tree by running the documented commands.
 
 ## FEAT-008 PR Summary Draft
 
-**Title:** Layer 4.4: Registry cleanup, docs, and full validation (FEAT-008)
+**Title:** Layer 4.2: Registry cleanup, docs, and full validation (FEAT-008)
 
 ```markdown
 Refs #2870.
@@ -74,7 +72,7 @@ Refs #2870.
 FEAT-008 completes EPIC-002 (Command Single Responsibility Extraction) by
 removing transition-only command scaffolding, validating command and alias
 uniqueness, updating source-verified command architecture documentation, and
-preparing auditable EPIC closure evidence. This is Layer 4.4 (the final cleanup
+preparing auditable EPIC closure evidence. This is Layer 4.2 (the final cleanup
 and validation layer).
 
 ## Changes
