@@ -123,6 +123,7 @@ pub enum Op {
     RunShellCommand {
         command: String,
         mode: AppMode,
+        allow_shell: bool,
         trust_mode: bool,
         auto_approve: bool,
         approval_mode: ApprovalMode,
@@ -159,7 +160,13 @@ pub enum Op {
 
     /// Change the operating mode
     #[allow(dead_code)]
-    ChangeMode { mode: AppMode },
+    ChangeMode {
+        mode: AppMode,
+        allow_shell: bool,
+        trust_mode: bool,
+        auto_approve: bool,
+        approval_mode: ApprovalMode,
+    },
 
     /// Update the model being used and refresh stable prompt context.
     #[allow(dead_code)]

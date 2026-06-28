@@ -4454,7 +4454,7 @@ async fn run_event_loop(
                     let prior_mode = app.mode;
                     app.cycle_mode();
                     if app.mode != prior_mode {
-                        sync_mode_update(&engine_handle, app.mode).await;
+                        sync_mode_update(app, &engine_handle).await;
                     }
                     if app.model != prior_model {
                         let _ = engine_handle
@@ -6414,13 +6414,21 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     true
 }
 
-async fn sync_mode_update(engine_handle: &EngineHandle, mode: AppMode) {
-    let _ = engine_handle.send(Op::ChangeMode { mode }).await;
+async fn sync_mode_update(app: &App, engine_handle: &EngineHandle) {
+    let _ = engine_handle
+        .send(Op::ChangeMode {
+            mode: app.mode,
+            allow_shell: app.allow_shell,
+            trust_mode: app.trust_mode,
+            auto_approve: app_auto_approve_enabled(app),
+            approval_mode: app.approval_mode,
+        })
+        .await;
 }
 
 async fn apply_mode_update(app: &mut App, engine_handle: &EngineHandle, mode: AppMode) -> bool {
     if app.set_mode(mode) {
-        sync_mode_update(engine_handle, mode).await;
+        sync_mode_update(app, engine_handle).await;
         true
     } else {
         false
@@ -6445,6 +6453,7 @@ async fn handle_bang_shell_input(
         .send(Op::RunShellCommand {
             command: command.to_string(),
             mode: app.mode,
+            allow_shell: app.allow_shell,
             trust_mode: app.trust_mode,
             auto_approve: app_auto_approve_enabled(app),
             approval_mode: app.approval_mode,
@@ -7156,8 +7165,8 @@ async fn apply_command_result(
                     persistence_actor::persist(PersistRequest::ClearCheckpoint);
                 }
             }
-            AppAction::ModeChanged(mode) => {
-                sync_mode_update(engine_handle, mode).await;
+            AppAction::ModeChanged(_mode) => {
+                sync_mode_update(app, engine_handle).await;
             }
             AppAction::SendMessage(content) => {
                 let queued = build_queued_message(app, content);
@@ -9293,7 +9302,7 @@ async fn handle_view_events(
                 let prior_mode = app.mode;
                 let msg = commands::switch_mode(app, mode);
                 if app.mode != prior_mode {
-                    sync_mode_update(engine_handle, app.mode).await;
+                    sync_mode_update(app, engine_handle).await;
                 }
                 app.add_message(HistoryCell::System { content: msg });
             }

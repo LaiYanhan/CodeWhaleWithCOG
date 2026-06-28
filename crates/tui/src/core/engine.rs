@@ -1027,6 +1027,7 @@ impl Engine {
         &mut self,
         command: String,
         mode: AppMode,
+        allow_shell: bool,
         trust_mode: bool,
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
@@ -1047,15 +1048,7 @@ impl Engine {
             .unwrap_or_default()
             .to_string();
 
-        self.session.trust_mode = trust_mode;
-        self.config.trust_mode = trust_mode;
-        self.session.auto_approve = auto_approve;
-        let agent_approval_mode = agent_approval_mode_for_turn(auto_approve, approval_mode);
-        // Only track the Agent-mode approval — Yolo/Plan have fixed
-        // approval policies that are derived from the mode itself.
-        if mode == AppMode::Agent {
-            self.session.approval_mode = agent_approval_mode;
-        }
+        self.apply_runtime_mode_policy(mode, allow_shell, trust_mode, auto_approve, approval_mode);
 
         let _ = self
             .tx_event
@@ -1290,6 +1283,23 @@ impl Engine {
         }
     }
 
+    fn apply_runtime_mode_policy(
+        &mut self,
+        mode: AppMode,
+        allow_shell: bool,
+        trust_mode: bool,
+        auto_approve: bool,
+        approval_mode: crate::tui::approval::ApprovalMode,
+    ) {
+        self.current_mode = mode;
+        self.session.allow_shell = allow_shell;
+        self.config.allow_shell = allow_shell;
+        self.session.trust_mode = trust_mode;
+        self.config.trust_mode = trust_mode;
+        self.session.auto_approve = auto_approve;
+        self.session.approval_mode = agent_approval_mode_for_turn(auto_approve, approval_mode);
+    }
+
     /// Run the engine event loop
     #[allow(clippy::too_many_lines)]
     pub async fn run(mut self) {
@@ -1365,6 +1375,7 @@ impl Engine {
                     Op::RunShellCommand {
                         command,
                         mode,
+                        allow_shell,
                         trust_mode,
                         auto_approve,
                         approval_mode,
@@ -1372,6 +1383,7 @@ impl Engine {
                         self.handle_run_shell_command(
                             command,
                             mode,
+                            allow_shell,
                             trust_mode,
                             auto_approve,
                             approval_mode,
@@ -1494,8 +1506,20 @@ impl Engine {
                         };
                         let _ = self.tx_event.send(Event::AgentList { agents }).await;
                     }
-                    Op::ChangeMode { mode } => {
-                        self.current_mode = mode;
+                    Op::ChangeMode {
+                        mode,
+                        allow_shell,
+                        trust_mode,
+                        auto_approve,
+                        approval_mode,
+                    } => {
+                        self.apply_runtime_mode_policy(
+                            mode,
+                            allow_shell,
+                            trust_mode,
+                            auto_approve,
+                            approval_mode,
+                        );
                         self.emit_session_updated().await;
                         let _ = self
                             .tx_event
@@ -2198,8 +2222,16 @@ impl Engine {
         // Reset cancel token for fresh turn (in case previous was cancelled)
         self.reset_cancel_token();
 
-        // Track current mode so mid-turn messages include the right mode in turn metadata.
-        self.current_mode = input_policy.mode;
+        // Track the complete effective mode policy so mid-turn metadata, `/edit`,
+        // idle worker resumptions, and approval gates cannot read a stale policy
+        // after the UI changed modes (#3568).
+        self.apply_runtime_mode_policy(
+            input_policy.mode,
+            input_policy.allow_shell,
+            input_policy.trust_mode,
+            input_policy.auto_approve,
+            input_policy.approval_mode,
+        );
 
         // Drain stale steer messages from previous turns.
         while self.rx_steer.try_recv().is_ok() {}
@@ -2297,15 +2329,6 @@ impl Engine {
             .observe_user_message(&content, &self.session.workspace);
         let force_update_plan_first = should_force_update_plan_first(input_policy.mode, &content);
 
-        let agent_approval_mode =
-            agent_approval_mode_for_turn(input_policy.auto_approve, input_policy.approval_mode);
-        self.session.auto_approve = input_policy.auto_approve;
-        // Only track the Agent-mode approval — Yolo/Plan have fixed
-        // approval policies that are derived from the mode itself.
-        if input_policy.mode == AppMode::Agent {
-            self.session.approval_mode = agent_approval_mode;
-        }
-
         // Add user message to session
         let user_msg = self.user_text_message_with_turn_metadata_for_route_and_provenance(
             content,
@@ -2343,10 +2366,6 @@ impl Engine {
         self.session.reasoning_effort = reasoning_effort;
         self.session.reasoning_effort_auto = reasoning_effort_auto;
         self.session.auto_model = auto_model;
-        self.session.allow_shell = input_policy.allow_shell;
-        self.config.allow_shell = input_policy.allow_shell;
-        self.session.trust_mode = input_policy.trust_mode;
-        self.config.trust_mode = input_policy.trust_mode;
         self.config.translation_enabled = translation_enabled;
         self.config.show_thinking = show_thinking;
         self.config.verbosity = verbosity;

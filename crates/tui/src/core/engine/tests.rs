@@ -2201,6 +2201,8 @@ fn deferred_tool_preflight_guides_checklist_update_list_replacement() {
 #[tokio::test]
 async fn run_shell_command_op_requests_approval_and_executes_shell() {
     let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.session.allow_shell = false;
+    engine.config.allow_shell = false;
     let handle_for_approval = handle.clone();
 
     let task = tokio::spawn(async move {
@@ -2208,6 +2210,7 @@ async fn run_shell_command_op_requests_approval_and_executes_shell() {
             .handle_run_shell_command(
                 "echo bang-ok".to_string(),
                 AppMode::Agent,
+                true,
                 false,
                 false,
                 crate::tui::approval::ApprovalMode::Suggest,
@@ -2276,6 +2279,7 @@ async fn run_shell_command_op_skips_approval_when_auto_approved() {
             AppMode::Yolo,
             true,
             true,
+            true,
             crate::tui::approval::ApprovalMode::Auto,
         )
         .await;
@@ -2323,6 +2327,7 @@ async fn yolo_mode_does_not_prompt_for_typed_ask_rule() {
         .handle_run_shell_command(
             "echo yolo-ask-rule".to_string(),
             AppMode::Yolo,
+            true,
             true,
             true,
             crate::tui::approval::ApprovalMode::Auto,
@@ -2629,6 +2634,7 @@ async fn run_shell_command_op_preserves_plan_mode_shell_block() {
         .handle_run_shell_command(
             "echo blocked".to_string(),
             AppMode::Plan,
+            false,
             false,
             false,
             crate::tui::approval::ApprovalMode::Suggest,
@@ -3139,6 +3145,10 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
     handle
         .send(Op::ChangeMode {
             mode: AppMode::Yolo,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
         })
         .await
         .expect("send change mode");
@@ -3238,6 +3248,10 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
     handle
         .send(Op::ChangeMode {
             mode: AppMode::Yolo,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
         })
         .await
         .expect("send change mode");
@@ -3267,6 +3281,61 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
     );
 
     run.abort();
+}
+
+#[test]
+fn runtime_mode_policy_updates_engine_session_mirrors() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        allow_shell: false,
+        trust_mode: false,
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    engine.current_mode = AppMode::Plan;
+    engine.session.allow_shell = false;
+    engine.session.trust_mode = false;
+    engine.session.auto_approve = false;
+    engine.session.approval_mode = crate::tui::approval::ApprovalMode::Suggest;
+
+    engine.apply_runtime_mode_policy(
+        AppMode::Agent,
+        true,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Never,
+    );
+
+    assert_eq!(engine.current_mode, AppMode::Agent);
+    assert!(engine.session.allow_shell);
+    assert!(engine.config.allow_shell);
+    assert!(!engine.session.trust_mode);
+    assert!(!engine.config.trust_mode);
+    assert!(!engine.session.auto_approve);
+    assert_eq!(
+        engine.session.approval_mode,
+        crate::tui::approval::ApprovalMode::Never
+    );
+
+    engine.apply_runtime_mode_policy(
+        AppMode::Yolo,
+        true,
+        true,
+        true,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+
+    assert_eq!(engine.current_mode, AppMode::Yolo);
+    assert!(engine.session.allow_shell);
+    assert!(engine.session.trust_mode);
+    assert!(engine.config.trust_mode);
+    assert!(engine.session.auto_approve);
+    assert_eq!(
+        engine.session.approval_mode,
+        crate::tui::approval::ApprovalMode::Bypass
+    );
 }
 
 #[tokio::test]
@@ -3352,6 +3421,10 @@ async fn edit_last_turn_preserves_current_mode() {
     handle
         .send(Op::ChangeMode {
             mode: AppMode::Plan,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
         })
         .await
         .expect("send plan mode");

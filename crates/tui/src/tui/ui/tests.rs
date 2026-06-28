@@ -2688,8 +2688,47 @@ async fn mode_change_update_notifies_engine() {
     assert!(apply_mode_update(&mut app, &engine.handle, crate::tui::app::AppMode::Yolo).await);
 
     match engine.rx_op.recv().await.expect("change mode op") {
-        crate::core::ops::Op::ChangeMode { mode } => {
+        crate::core::ops::Op::ChangeMode {
+            mode,
+            allow_shell,
+            trust_mode,
+            auto_approve,
+            approval_mode,
+        } => {
             assert_eq!(mode, crate::tui::app::AppMode::Yolo);
+            assert!(allow_shell);
+            assert!(trust_mode);
+            assert!(auto_approve);
+            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Bypass);
+        }
+        other => panic!("expected ChangeMode, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn mode_change_update_sends_restored_agent_policy() {
+    let mut app = create_test_app();
+    app.allow_shell = true;
+    app.trust_mode = false;
+    app.approval_mode = crate::tui::approval::ApprovalMode::Never;
+    let _ = app.set_mode(crate::tui::app::AppMode::Plan);
+    let mut engine = crate::core::engine::mock_engine_handle();
+
+    assert!(apply_mode_update(&mut app, &engine.handle, crate::tui::app::AppMode::Agent).await);
+
+    match engine.rx_op.recv().await.expect("change mode op") {
+        crate::core::ops::Op::ChangeMode {
+            mode,
+            allow_shell,
+            trust_mode,
+            auto_approve,
+            approval_mode,
+        } => {
+            assert_eq!(mode, crate::tui::app::AppMode::Agent);
+            assert!(allow_shell);
+            assert!(!trust_mode);
+            assert!(!auto_approve);
+            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Never);
         }
         other => panic!("expected ChangeMode, got {other:?}"),
     }
@@ -5155,12 +5194,14 @@ async fn bang_shell_input_dispatches_shell_op_instead_of_model_message() {
         Op::RunShellCommand {
             command,
             mode,
+            allow_shell,
             trust_mode,
             auto_approve,
             approval_mode,
         } => {
             assert_eq!(command, "pwd");
             assert_eq!(mode, AppMode::Agent);
+            assert!(!allow_shell);
             assert!(!trust_mode);
             assert!(!auto_approve);
             assert_eq!(approval_mode, ApprovalMode::Suggest);
@@ -5188,12 +5229,14 @@ async fn bang_shell_input_keeps_auto_review_separate_from_bypass() {
         Op::RunShellCommand {
             command,
             mode,
+            allow_shell,
             trust_mode,
             auto_approve,
             approval_mode,
         } => {
             assert_eq!(command, "pwd");
             assert_eq!(mode, AppMode::Agent);
+            assert!(!allow_shell);
             assert!(trust_mode);
             assert!(!auto_approve);
             assert_eq!(approval_mode, ApprovalMode::Auto);
