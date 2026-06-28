@@ -86,6 +86,16 @@ pub(crate) fn render_modal_surface(area: Rect, popup_area: Rect, buf: &mut Buffe
         .render(popup_area, buf);
 }
 
+fn render_modal_backdrop(area: Rect, buf: &mut Buffer) {
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buf[(x, y)]
+                .set_symbol(" ")
+                .set_style(Style::default().bg(palette::DEEPSEEK_INK));
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CommandPaletteAction {
     ExecuteCommand { command: String },
@@ -350,6 +360,9 @@ impl ViewStack {
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        if !self.views.is_empty() {
+            render_modal_backdrop(area, buf);
+        }
         for view in &self.views {
             view.render(area, buf);
         }
@@ -2387,7 +2400,11 @@ mod tests {
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Style},
+    };
     use std::borrow::Cow;
     use std::ffi::OsString;
     use std::fs;
@@ -3317,6 +3334,69 @@ base_url = "https://api.xiaomimimo.com/v1"
         stack.push(HelpView::new_for_locale(crate::localization::Locale::En));
         assert!(!stack.handle_paste("hello"));
         assert_eq!(stack.top_kind(), Some(ModalKind::Help));
+    }
+
+    struct BareModal;
+
+    impl ModalView for BareModal {
+        fn kind(&self) -> ModalKind {
+            ModalKind::ContextMenu
+        }
+
+        fn handle_key(&mut self, _key: KeyEvent) -> ViewAction {
+            ViewAction::None
+        }
+
+        fn render(&self, area: Rect, buf: &mut Buffer) {
+            let x = area.x + area.width / 2;
+            let y = area.y + area.height / 2;
+            buf[(x, y)]
+                .set_symbol("M")
+                .set_style(Style::default().fg(Color::White).bg(Color::Red));
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn view_stack_paints_opaque_backdrop_before_modal() {
+        let area = Rect::new(0, 0, 24, 8);
+        let modal_x = area.x + area.width / 2;
+        let modal_y = area.y + area.height / 2;
+        let mut buf = Buffer::empty(area);
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                buf[(x, y)]
+                    .set_symbol("X")
+                    .set_style(Style::default().fg(Color::Red).bg(Color::Blue));
+            }
+        }
+
+        let mut stack = ViewStack::new();
+        stack.push(BareModal);
+        stack.render(area, &mut buf);
+
+        assert_eq!(buf[(modal_x, modal_y)].symbol(), "M");
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if x == modal_x && y == modal_y {
+                    continue;
+                }
+                let cell = &buf[(x, y)];
+                assert_eq!(
+                    cell.symbol(),
+                    " ",
+                    "stale glyph at ({x},{y}) must be cleared"
+                );
+                assert_eq!(
+                    cell.bg,
+                    palette::DEEPSEEK_INK,
+                    "backdrop at ({x},{y}) must be opaque"
+                );
+            }
+        }
     }
 
     fn buffer_text(buf: &Buffer, area: Rect) -> String {
