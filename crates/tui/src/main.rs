@@ -1420,7 +1420,7 @@ async fn main() -> Result<()> {
     };
 
     // Default: Interactive TUI
-    // --yolo starts in YOLO mode (auto-approve; shell if allow_shell=true)
+    // --yolo starts in YOLO mode (auto-approve; shell enabled)
     run_interactive(&cli, &config, resume_session_id, None).await
 }
 
@@ -6409,6 +6409,10 @@ fn normalize_windows_config_path_str(path: &str) -> String {
     normalized.to_ascii_lowercase()
 }
 
+fn interactive_tui_allow_shell(yolo: bool, config: &Config) -> bool {
+    yolo || config.allow_shell.unwrap_or(true)
+}
+
 async fn run_interactive(
     cli: &Cli,
     config: &Config,
@@ -6513,7 +6517,7 @@ async fn run_interactive(
             workspace,
             config_path: cli.config.clone(),
             config_profile: cli.profile.clone(),
-            allow_shell: yolo || config.allow_shell(),
+            allow_shell: interactive_tui_allow_shell(yolo, config),
             use_alt_screen,
             use_mouse_capture,
             use_bracketed_paste,
@@ -8817,6 +8821,34 @@ mod terminal_mode_tests {
             None,
             None,
         ));
+    }
+}
+
+#[cfg(test)]
+mod interactive_startup_tests {
+    use super::*;
+
+    #[test]
+    fn interactive_tui_defaults_agent_shell_to_approval_gated_on() {
+        let default_config = Config::default();
+        assert!(
+            interactive_tui_allow_shell(false, &default_config),
+            "interactive Agent mode should expose shell tools by default so approvals can gate commands"
+        );
+
+        let disabled = Config {
+            allow_shell: Some(false),
+            ..Config::default()
+        };
+        assert!(
+            !interactive_tui_allow_shell(false, &disabled),
+            "explicit allow_shell=false still hides shell tools"
+        );
+
+        assert!(
+            interactive_tui_allow_shell(true, &disabled),
+            "YOLO forces shell access for its no-guardrails contract"
+        );
     }
 }
 
