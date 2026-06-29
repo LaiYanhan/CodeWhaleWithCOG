@@ -344,7 +344,7 @@
     "ApprovalFieldImpact": "Impact: ",
     "ApprovalFieldParams": "Params: ",
     "ApprovalOptionApproveOnce": "Approve once",
-    "ApprovalOptionApproveAlways": "Approve always for this kind",
+    "ApprovalOptionApproveAlways": "Approve for this session (this kind)",
     "ApprovalOptionDeny": "Deny this call",
     "ApprovalOptionAbortTurn": "Abort the turn",
     "ApprovalBlockTitle": "approval",

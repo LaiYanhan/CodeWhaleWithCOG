@@ -330,7 +330,7 @@
     "ApprovalFieldImpact": "影響：",
     "ApprovalFieldParams": "パラメータ：",
     "ApprovalOptionApproveOnce": "1回だけ承認",
-    "ApprovalOptionApproveAlways": "常に承認（この種類）",
+    "ApprovalOptionApproveAlways": "このセッションで承認（この種類）",
     "ApprovalOptionDeny": "拒否",
     "ApprovalOptionAbortTurn": "中断",
     "ApprovalBlockTitle": "承認",

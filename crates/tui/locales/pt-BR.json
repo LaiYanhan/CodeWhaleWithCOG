@@ -320,7 +320,7 @@
     "ApprovalFieldImpact": "Impacto:",
     "ApprovalFieldParams": "Parâmetros:",
     "ApprovalOptionApproveOnce": "Aprovar uma vez",
-    "ApprovalOptionApproveAlways": "Aprovar sempre para este tipo",
+    "ApprovalOptionApproveAlways": "Aprovar nesta sessão (este tipo)",
     "ApprovalOptionDeny": "Negar esta chamada",
     "ApprovalOptionAbortTurn": "Abortar turno",
     "ApprovalBlockTitle": "aprovação",

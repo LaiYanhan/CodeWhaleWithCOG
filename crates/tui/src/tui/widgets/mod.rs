@@ -1757,9 +1757,13 @@ fn push_compact_approval_controls(
     locale: Locale,
     can_save_rule: bool,
 ) {
-    let (once, always, deny, abort, save) = match locale {
-        Locale::ZhHans => ("仅本次", "始终", "拒绝", "中止", "保存"),
-        _ => ("once", "always", "deny", "abort", "save"),
+    // `[a]` maps to ReviewDecision::ApprovedForSession (stored only in the
+    // in-memory session approval set), so the label must say "session", not
+    // "always". Persisting an approval across sessions is the separate `[s]`
+    // save-rule action (#3766).
+    let (once, session, deny, abort, save) = match locale {
+        Locale::ZhHans => ("仅本次", "本会话", "拒绝", "中止", "保存"),
+        _ => ("once", "session", "deny", "abort", "save"),
     };
     lines.push(Line::from(vec![
         Span::raw("  "),
@@ -1767,7 +1771,7 @@ fn push_compact_approval_controls(
         Span::styled(format!("{once}  "), Style::default().fg(palette::TEXT_BODY)),
         Span::styled("[a] ", Style::default().fg(shortcut).bold()),
         Span::styled(
-            format!("{always}  "),
+            format!("{session}  "),
             Style::default().fg(palette::TEXT_BODY),
         ),
         Span::styled("[d] ", Style::default().fg(accent).bold()),
@@ -4925,6 +4929,43 @@ mod tests {
         assert!(
             rendered.contains('\u{2500}'),
             "approve and deny groups should be split by a divider:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn approval_option_two_reads_as_session_scoped_not_always() {
+        // #3766: option 2 / `a` maps to ReviewDecision::ApprovedForSession, so
+        // neither the full option rows nor the compact controls may tell the
+        // user the approval is "always"/permanent. Persisting is the separate
+        // `s` save-rule action.
+        let request = crate::tui::approval::ApprovalRequest::new(
+            "approval-1",
+            "exec_shell",
+            "Run git commit",
+            &serde_json::json!({ "command": "git commit -m fix" }),
+            "exec_shell:git commit",
+        );
+
+        // Full card (tall): full option rows render the session-scoped label.
+        let full = render_approval_request(&request, Rect::new(0, 0, 100, 30));
+        assert!(
+            full.to_lowercase().contains("this session"),
+            "full approval option must state session scope:\n{full}"
+        );
+        assert!(
+            !full.to_lowercase().contains("always"),
+            "full approval card must not call the session option 'always':\n{full}"
+        );
+
+        // Compact card (short): `[a]` control label must say session, not always.
+        let compact = render_approval_request(&request, Rect::new(0, 0, 60, 17));
+        assert!(
+            compact.contains("[a]") && compact.to_lowercase().contains("session"),
+            "compact controls must label [a] as session-scoped:\n{compact}"
+        );
+        assert!(
+            !compact.to_lowercase().contains("always"),
+            "compact controls must not label the session option 'always':\n{compact}"
         );
     }
 

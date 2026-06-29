@@ -329,7 +329,7 @@
     "ApprovalFieldImpact": "Tác động:",
     "ApprovalFieldParams": "Tham số:",
     "ApprovalOptionApproveOnce": "Phê duyệt một lần",
-    "ApprovalOptionApproveAlways": "Phê duyệt mọi lần cho loại này",
+    "ApprovalOptionApproveAlways": "Phê duyệt trong phiên này (loại này)",
     "ApprovalOptionDeny": "Từ chối lần gọi này",
     "ApprovalOptionAbortTurn": "Hủy bỏ lượt",
     "ApprovalBlockTitle": "phê duyệt",
