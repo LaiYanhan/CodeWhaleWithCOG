@@ -509,8 +509,10 @@ mod tests {
     fn preview_hash_is_independent_of_source_path() {
         let c = sample();
         let h = c.preview_hash();
-        // render_block takes a source, but the hash is over render_body only.
-        c.render_block(Some(Path::new("/some/home/constitution.json")));
+        // render_block takes a source, but the hash is over render_body only,
+        // so rendering with a path must not change the preview hash.
+        let block = c.render_block(Some(Path::new("/some/home/constitution.json")));
+        assert!(block.unwrap().contains("/some/home/constitution.json"));
         assert_eq!(h, c.preview_hash());
     }
 
