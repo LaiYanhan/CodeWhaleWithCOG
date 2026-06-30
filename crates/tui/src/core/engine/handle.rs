@@ -87,17 +87,6 @@ impl EngineHandle {
         Ok(())
     }
 
-    /// Auto-approve a pending tool call on the active mode's authority (e.g.
-    /// YOLO), as opposed to an individual user decision. The result is stamped
-    /// as auto-approved-by-mode so the model is told the truth about why the
-    /// tool ran without a prompt (#3790).
-    pub async fn approve_tool_call_by_mode(&self, id: impl Into<String>) -> Result<()> {
-        self.tx_approval
-            .send(ApprovalDecision::ApprovedByMode { id: id.into() })
-            .await?;
-        Ok(())
-    }
-
     /// Deny a pending tool call
     pub async fn deny_tool_call(&self, id: impl Into<String>) -> Result<()> {
         self.tx_approval

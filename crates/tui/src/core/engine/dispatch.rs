@@ -76,10 +76,6 @@ pub(super) struct ParallelToolResult {
 pub(super) enum ToolApprovalStamp {
     ApprovedByUser,
     ApprovedWithPolicy,
-    /// Auto-approved on the active mode's authority (e.g. YOLO), with no user
-    /// prompt. Kept distinct from `ApprovedByUser` so the model is never told a
-    /// user approved a call they were never shown (#3790).
-    AutoApprovedByMode,
 }
 
 impl ToolApprovalStamp {
@@ -87,7 +83,6 @@ impl ToolApprovalStamp {
         match self {
             Self::ApprovedByUser => "approved_by_user",
             Self::ApprovedWithPolicy => "approved_with_policy",
-            Self::AutoApprovedByMode => "auto_approved_by_mode",
         }
     }
 
@@ -98,9 +93,6 @@ impl ToolApprovalStamp {
             }
             Self::ApprovedWithPolicy => {
                 "[approval] This tool call required approval and was approved by the user with an adjusted execution policy before execution."
-            }
-            Self::AutoApprovedByMode => {
-                "[approval] This tool call would require approval in Agent mode; the active mode (e.g. YOLO) auto-approved it and ran it without a user prompt."
             }
         }
     }

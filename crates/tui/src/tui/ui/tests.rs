@@ -1900,7 +1900,7 @@ fn forced_approval_prompt_bypasses_session_approval_shortcut() {
 }
 
 #[test]
-fn non_forced_approval_request_keeps_existing_auto_shortcuts() {
+fn approval_request_uses_session_cache_not_current_mode_shortcut() {
     let mut app = create_test_app();
     app.approval_mode = ApprovalMode::Auto;
     assert!(!should_auto_approve_approval_request(
@@ -1911,7 +1911,7 @@ fn non_forced_approval_request_keeps_existing_auto_shortcuts() {
     ));
 
     app.approval_mode = ApprovalMode::Bypass;
-    assert!(should_auto_approve_approval_request(
+    assert!(!should_auto_approve_approval_request(
         &app,
         "exec_shell",
         "shell:exec_shell:cargo test",
@@ -1919,6 +1919,15 @@ fn non_forced_approval_request_keeps_existing_auto_shortcuts() {
     ));
 
     app.approval_mode = ApprovalMode::Suggest;
+    app.mode = AppMode::Yolo;
+    assert!(!should_auto_approve_approval_request(
+        &app,
+        "exec_shell",
+        "shell:exec_shell:cargo test",
+        false,
+    ));
+
+    app.mode = AppMode::Agent;
     app.approval_session_approved
         .insert("shell:exec_shell:cargo test".to_string());
     assert!(should_auto_approve_approval_request(

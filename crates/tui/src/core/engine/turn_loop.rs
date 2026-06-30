@@ -2276,16 +2276,6 @@ impl Engine {
                                     }));
                                     (None, None, Some(ToolApprovalStamp::ApprovedByUser))
                                 }
-                                Ok(ApprovalResult::ApprovedByMode) => {
-                                    emit_tool_audit(json!({
-                                        "event": "tool.approval_decision",
-                                        "tool_id": tool_id.clone(),
-                                        "tool_name": tool_name.clone(),
-                                        "decision": "auto_approved_by_mode",
-                                        "caller": caller_type_for_tool_use(tool_caller.as_ref()),
-                                    }));
-                                    (None, None, Some(ToolApprovalStamp::AutoApprovedByMode))
-                                }
                                 Ok(ApprovalResult::Denied) => {
                                     emit_tool_audit(json!({
                                         "event": "tool.approval_decision",

@@ -20,12 +20,6 @@ pub(super) enum ApprovalDecision {
     Approved {
         id: String,
     },
-    /// Auto-approved on the active mode's authority (e.g. YOLO/Bypass), not by
-    /// an individual user decision. Stamped honestly so the model is never told
-    /// the user approved something they were never prompted for (#3790).
-    ApprovedByMode {
-        id: String,
-    },
     Denied {
         id: String,
     },
@@ -52,8 +46,6 @@ pub(super) enum UserInputDecision {
 pub(super) enum ApprovalResult {
     /// User approved the tool execution.
     Approved,
-    /// The active mode auto-approved the tool execution (no user prompt).
-    ApprovedByMode,
     /// User denied the tool execution.
     Denied,
     /// User requested retry with an elevated sandbox policy.
@@ -100,9 +92,6 @@ impl Engine {
                     match decision {
                         ApprovalDecision::Approved { id } if id == tool_id => {
                             return Ok(ApprovalResult::Approved);
-                        }
-                        ApprovalDecision::ApprovedByMode { id } if id == tool_id => {
-                            return Ok(ApprovalResult::ApprovedByMode);
                         }
                         ApprovalDecision::Denied { id } if id == tool_id => {
                             return Ok(ApprovalResult::Denied);

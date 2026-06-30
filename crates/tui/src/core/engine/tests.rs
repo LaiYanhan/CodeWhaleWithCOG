@@ -1508,37 +1508,6 @@ fn approval_stamp_preserves_existing_metadata() {
 }
 
 #[test]
-fn auto_approved_by_mode_stamp_is_honest_and_not_attributed_to_the_user() {
-    // #3790: when the mode (e.g. YOLO) auto-approves a tool that would otherwise
-    // prompt, the model must be told the truth — auto-approved by the mode, NOT
-    // "approved by the user", which never happened.
-    let mut result = ToolResult::success("stdout");
-
-    stamp_tool_result_approval(&mut result, ToolApprovalStamp::AutoApprovedByMode);
-
-    assert!(
-        result.content.starts_with("[approval] "),
-        "{}",
-        result.content
-    );
-    assert!(
-        !result.content.contains("approved by the user"),
-        "must not claim the user approved it: {}",
-        result.content
-    );
-    assert!(
-        result.content.contains("auto-approved") && result.content.contains("mode"),
-        "should attribute the run to the mode: {}",
-        result.content
-    );
-    assert!(result.content.ends_with("stdout"));
-
-    let metadata = result.metadata.expect("approval metadata");
-    assert_eq!(metadata["approval"]["decision"], "auto_approved_by_mode");
-    assert_eq!(metadata["approval"]["model_visible"], true);
-}
-
-#[test]
 fn core_native_tools_stay_loaded_in_yolo_mode() {
     let always_load = HashSet::new();
     assert!(!should_default_defer_tool("exec_shell", &always_load));
