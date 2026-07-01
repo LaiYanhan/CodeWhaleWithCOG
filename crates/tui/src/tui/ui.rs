@@ -9490,6 +9490,19 @@ async fn handle_view_events(
                     app.status_message = Some(format!("Setup state could not be saved: {err}"));
                 }
             },
+            ViewEvent::SetupConstitutionCommitRequested {
+                constitution,
+                state,
+                message,
+            } => match crate::tui::setup::persist_user_constitution_choice(&constitution, &state) {
+                Ok(()) => {
+                    app.status_message = Some(message);
+                }
+                Err(err) => {
+                    app.status_message =
+                        Some(format!("User constitution could not be saved: {err}"));
+                }
+            },
             ViewEvent::HotbarDisableRequested => {
                 disable_hotbar(app, config);
             }

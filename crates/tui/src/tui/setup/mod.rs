@@ -29,9 +29,9 @@ use crate::tui::views::{
 };
 
 use codewhale_config::{
-    ConstitutionChoice, ConstitutionSource, ConstitutionValidity, InheritedConfigFacts,
-    RuntimePostureSource, SetupState, SetupStep, StepEntry, StepStatus, UserConstitution,
-    UserConstitutionLoad,
+    AutonomyPreference, ConstitutionChoice, ConstitutionSource, ConstitutionValidity,
+    InheritedConfigFacts, RuntimePostureSource, SetupState, SetupStep, StepEntry, StepStatus,
+    UserConstitution, UserConstitutionLoad,
 };
 
 /// Target lane for the once-per-version constitution checkpoint. The workspace
@@ -402,6 +402,36 @@ impl SetupWizardView {
         })
     }
 
+    fn commit_guided_constitution(&mut self) -> ViewAction {
+        let constitution = guided_constitution_template(self.locale);
+        let mut state = self.state.clone();
+        state.complete_constitution_checkpoint(
+            CONSTITUTION_CHECKPOINT_VERSION,
+            ConstitutionChoice::GuidedCustom,
+        );
+        state.constitution_language = constitution.language.clone();
+        state.constitution_source = ConstitutionSource::UserGlobal;
+        state.constitution_validity = ConstitutionValidity::Valid;
+        state.constitution_preview_hash = Some(constitution.preview_hash());
+        state.constitution_preview_version =
+            state.constitution_preview_version.saturating_add(1).max(1);
+        let hash = state
+            .constitution_preview_hash
+            .as_deref()
+            .unwrap_or("unknown");
+        state.set_step(
+            SetupStep::Constitution,
+            StepEntry::new(StepStatus::Verified, true, CONSTITUTION_CHECKPOINT_VERSION)
+                .with_result(format!("guided custom constitution preview_hash={hash}")),
+        );
+        self.state = state.clone();
+        ViewAction::EmitAndClose(ViewEvent::SetupConstitutionCommitRequested {
+            constitution,
+            state,
+            message: tr(self.locale, MessageId::SetupCheckpointDoneGuided).to_string(),
+        })
+    }
+
     fn commit_constitution(&self, kind: SetupCommitKind) -> ViewAction {
         let choice = match kind {
             SetupCommitKind::BundledConstitution => ConstitutionChoice::Bundled,
@@ -481,6 +511,9 @@ impl ModalView for SetupWizardView {
                 self.mark_selected(StepStatus::NeedsAction);
                 ViewAction::None
             }
+            KeyCode::Char('g') if self.selected_step() == SetupStep::Constitution => {
+                self.commit_guided_constitution()
+            }
             KeyCode::Char('u') => self.commit_constitution(SetupCommitKind::BundledConstitution),
             KeyCode::Char('d') => self.commit_constitution(SetupCommitKind::DeferredConstitution),
             KeyCode::Enter if self.selected_step() == SetupStep::Constitution => {
@@ -531,7 +564,7 @@ impl ModalView for SetupWizardView {
             .padding(Padding::new(2, 2, 1, 1));
         let inner = block.inner(popup_area);
         block.render(popup_area, buf);
-        let hints = [
+        let mut hints = vec![
             ActionHint::new("B", tr(self.locale, MessageId::SetupActionBack).to_string()),
             ActionHint::new(
                 "N",
@@ -542,6 +575,14 @@ impl ModalView for SetupWizardView {
                 "R",
                 tr(self.locale, MessageId::SetupActionRetry).to_string(),
             ),
+        ];
+        if self.selected_step() == SetupStep::Constitution {
+            hints.push(ActionHint::new(
+                "G",
+                tr(self.locale, MessageId::SetupActionGuided).to_string(),
+            ));
+        }
+        hints.extend([
             ActionHint::new(
                 "U",
                 tr(self.locale, MessageId::SetupActionUseBundled).to_string(),
@@ -554,7 +595,7 @@ impl ModalView for SetupWizardView {
                 "Esc",
                 tr(self.locale, MessageId::SetupActionCancel).to_string(),
             ),
-        ];
+        ]);
         let content_area = render_modal_footer(inner, buf, &hints);
         let spec = self.selected_spec();
         let mut lines = vec![
@@ -614,6 +655,7 @@ impl SetupWizardView {
         match self.selected_step() {
             SetupStep::ProviderModel => self.provider_model_detail_lines(),
             SetupStep::TrustSandbox => self.runtime_posture_detail_lines(),
+            SetupStep::Constitution => self.constitution_detail_lines(),
             SetupStep::Verification => self.verification_detail_lines(),
             _ => Vec::new(),
         }
@@ -635,6 +677,28 @@ impl SetupWizardView {
                     },
                 )
                 .to_string(),
+                Style::default().fg(palette::TEXT_MUTED),
+            )),
+        ]
+    }
+
+    fn constitution_detail_lines(&self) -> Vec<Line<'static>> {
+        let choice = constitution_choice_label(self.state.constitution_choice);
+        let source = constitution_source_label(self.state.constitution_source);
+        let validity = constitution_validity_label(self.state.constitution_validity);
+        let preview = self
+            .state
+            .constitution_preview_hash
+            .as_deref()
+            .unwrap_or("not accepted yet")
+            .to_string();
+        vec![
+            self.detail_row(MessageId::SetupConstitutionChoiceLabel, choice),
+            self.detail_row(MessageId::SetupConstitutionSourceLabel, source),
+            self.detail_row(MessageId::SetupConstitutionValidityLabel, validity),
+            self.detail_row(MessageId::SetupConstitutionPreviewLabel, &preview),
+            Line::from(Span::styled(
+                tr(self.locale, MessageId::SetupConstitutionGuidedHint).to_string(),
                 Style::default().fg(palette::TEXT_MUTED),
             )),
         ]
@@ -779,6 +843,92 @@ fn setup_report_result(state: &SetupState) -> String {
         state.constitution_choice,
         state.runtime_posture_source
     )
+}
+
+#[must_use]
+fn guided_constitution_template(locale: Locale) -> UserConstitution {
+    match locale {
+        Locale::ZhHans => UserConstitution {
+            language: Some(locale.tag().to_string()),
+            about: Some("希望 CodeWhale 成为稳健、重证据的工作台用户。".to_string()),
+            working_style: vec![
+                "保持改动聚焦，并简短说明重要取舍。".to_string(),
+                "在重要场景用命令、测试、截图或引用给出具体验证。".to_string(),
+                "保护密钥、用户文件、Git 历史、生产系统、成本、隐私和时间。".to_string(),
+            ],
+            priorities: vec![
+                "当前用户请求和实时工具证据优先于记忆、陈旧交接和猜测。".to_string(),
+                "遇到破坏性、高成本、凭据、发布、法律或安全风险操作时先询问。".to_string(),
+            ],
+            autonomy_preference: AutonomyPreference::Balanced,
+            notes: Some(
+                "这是用户全局常驻指导。自由文本只作为建议，不会改变审批、沙箱、Shell、网络、信任或 MCP 权限。"
+                    .to_string(),
+            ),
+            ..UserConstitution::default()
+        },
+        _ => UserConstitution {
+            language: Some(locale.tag().to_string()),
+            about: Some(
+                "A CodeWhale user who wants a calm, evidence-first coding workbench.".to_string(),
+            ),
+            working_style: vec![
+                "Keep changes scoped and explain important tradeoffs briefly.".to_string(),
+                "Prefer concrete verification with commands, tests, screenshots, or citations when they matter.".to_string(),
+                "Protect secrets, user files, git history, production systems, cost, privacy, and time.".to_string(),
+            ],
+            priorities: vec![
+                "Current user requests and live tool evidence outrank memory, stale handoffs, and guesses.".to_string(),
+                "Ask before destructive, high-cost, credential, publishing, legal, or security-risk actions.".to_string(),
+            ],
+            autonomy_preference: AutonomyPreference::Balanced,
+            notes: Some(
+                "Use this as user-global standing guidance. Freeform principles are advisory and do not change runtime approval, sandbox, shell, network, trust, or MCP permissions."
+                    .to_string(),
+            ),
+            ..UserConstitution::default()
+        },
+    }
+}
+
+fn constitution_choice_label(choice: ConstitutionChoice) -> &'static str {
+    match choice {
+        ConstitutionChoice::Unset => "unset",
+        ConstitutionChoice::Bundled => "bundled/default",
+        ConstitutionChoice::GuidedCustom => "guided custom",
+        ConstitutionChoice::ExpertOverride => "expert override",
+        ConstitutionChoice::Deferred => "deferred",
+    }
+}
+
+fn constitution_source_label(source: ConstitutionSource) -> &'static str {
+    match source {
+        ConstitutionSource::Bundled => "bundled",
+        ConstitutionSource::UserGlobal => "user-global constitution.json",
+        ConstitutionSource::ExpertOverride => "expert full Markdown override",
+    }
+}
+
+fn constitution_validity_label(validity: ConstitutionValidity) -> &'static str {
+    match validity {
+        ConstitutionValidity::Unknown => "unknown",
+        ConstitutionValidity::Valid => "valid",
+        ConstitutionValidity::Invalid => "invalid",
+        ConstitutionValidity::Empty => "empty",
+        ConstitutionValidity::Unreadable => "unreadable",
+    }
+}
+
+pub fn persist_user_constitution_choice(
+    constitution: &UserConstitution,
+    state: &SetupState,
+) -> anyhow::Result<()> {
+    let constitution_path = UserConstitution::path()?;
+    let setup_state_path = SetupState::path()?;
+    let mut transaction = codewhale_config::persistence::SetupTransaction::new();
+    transaction.stage_json(constitution_path, &constitution.bounded())?;
+    transaction.stage_json(setup_state_path, state)?;
+    transaction.commit()
 }
 
 #[must_use]
@@ -942,6 +1092,104 @@ mod tests {
         assert_ne!(
             tr(Locale::ZhHans, MessageId::SetupCheckpointDoneBundled),
             tr(Locale::En, MessageId::SetupCheckpointDoneBundled)
+        );
+    }
+
+    #[test]
+    fn guided_constitution_commit_emits_structured_payload() {
+        let mut view = SetupWizardView::new(SetupState::default(), Locale::En);
+
+        let action = view.handle_key(key(KeyCode::Char('g')));
+
+        let ViewAction::EmitAndClose(ViewEvent::SetupConstitutionCommitRequested {
+            constitution,
+            state,
+            message,
+        }) = action
+        else {
+            panic!("expected guided constitution commit event");
+        };
+        assert_eq!(constitution.language.as_deref(), Some("en"));
+        assert_eq!(
+            constitution.autonomy_preference,
+            AutonomyPreference::Balanced
+        );
+        assert_eq!(state.constitution_choice, ConstitutionChoice::GuidedCustom);
+        assert_eq!(state.constitution_source, ConstitutionSource::UserGlobal);
+        assert_eq!(state.constitution_validity, ConstitutionValidity::Valid);
+        assert_eq!(
+            state.constitution_preview_hash.as_deref(),
+            Some(constitution.preview_hash().as_str())
+        );
+        assert_eq!(state.status(SetupStep::Constitution), StepStatus::Verified);
+        assert_eq!(state.runtime_posture_source, RuntimePostureSource::Unset);
+        assert!(message.contains("Guided user-global constitution saved"));
+    }
+
+    #[test]
+    fn guided_constitution_key_is_contextual_to_constitution_step() {
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::ProviderModel,
+            SetupRuntimeFacts::default(),
+        );
+
+        let action = view.handle_key(key(KeyCode::Char('g')));
+
+        assert!(matches!(action, ViewAction::None));
+        assert_eq!(view.selected_step(), SetupStep::ProviderModel);
+        assert_eq!(view.state().constitution_choice, ConstitutionChoice::Unset);
+    }
+
+    #[test]
+    fn guided_constitution_template_localizes_content() {
+        let english = guided_constitution_template(Locale::En).render_body();
+        let zh_hans = guided_constitution_template(Locale::ZhHans).render_body();
+
+        assert!(english.contains("evidence-first coding workbench"));
+        assert!(zh_hans.contains("重证据"));
+        assert_ne!(english, zh_hans);
+    }
+
+    #[test]
+    fn persist_user_constitution_choice_writes_constitution_and_state() {
+        let _guard = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let constitution = guided_constitution_template(Locale::En);
+        let mut state = SetupState::default();
+        state.complete_constitution_checkpoint(
+            CONSTITUTION_CHECKPOINT_VERSION,
+            ConstitutionChoice::GuidedCustom,
+        );
+        state.constitution_source = ConstitutionSource::UserGlobal;
+        state.constitution_validity = ConstitutionValidity::Valid;
+        state.constitution_preview_hash = Some(constitution.preview_hash());
+        state.set_step(
+            SetupStep::Constitution,
+            StepEntry::new(StepStatus::Verified, true, CONSTITUTION_CHECKPOINT_VERSION),
+        );
+
+        persist_user_constitution_choice(&constitution, &state).expect("persist constitution");
+
+        let loaded_constitution = UserConstitution::load().expect("load constitution");
+        assert!(matches!(
+            loaded_constitution,
+            UserConstitutionLoad::Loaded(_)
+        ));
+        let loaded_state = SetupState::load()
+            .expect("load setup state")
+            .expect("setup state");
+        assert_eq!(
+            loaded_state.constitution_choice,
+            ConstitutionChoice::GuidedCustom
+        );
+        assert_eq!(
+            loaded_state
+                .constitution_checkpoint_completed_for
+                .as_deref(),
+            Some(CONSTITUTION_CHECKPOINT_VERSION)
         );
     }
 

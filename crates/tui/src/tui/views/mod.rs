@@ -466,6 +466,14 @@ pub enum ViewEvent {
         state: codewhale_config::SetupState,
         message: String,
     },
+    /// Emitted by the constitution-first setup shell when accepting a guided
+    /// structured user-global constitution. The host commits the constitution
+    /// and matching setup-state record together.
+    SetupConstitutionCommitRequested {
+        constitution: codewhale_config::UserConstitution,
+        state: codewhale_config::SetupState,
+        message: String,
+    },
     /// Emitted by the `/hotbar` setup wizard when the user chooses "Disable
     /// Hotbar". The host persists `hotbar = []` and hides the panel.
     HotbarDisableRequested,
