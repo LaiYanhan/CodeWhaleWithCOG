@@ -284,7 +284,10 @@ impl FleetHostAdapter for LocalProcessFleetHostAdapter {
                     state: FleetHostWorkerState::Running,
                     pid: Some(pid),
                     exit_code: None,
-                    memory_mb,
+                    // Report the retained value, not the raw sample: a
+                    // transient ps failure must not flicker a live worker's
+                    // memory to None (the Exited arm already does this).
+                    memory_mb: process.last_memory_mb,
                     retryable: false,
                 })
             }
@@ -661,7 +664,10 @@ fn status_from_exit(
 
 #[cfg(unix)]
 fn sample_process_memory_mb(pid: u32) -> Option<u64> {
-    let output = Command::new("/bin/ps")
+    // Resolve `ps` via PATH like every other external command in the
+    // codebase: /bin/ps does not exist on NixOS and some minimal containers,
+    // which would silently report permanent None for live workers.
+    let output = Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
         .ok()?;
@@ -843,8 +849,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sample_process_memory_is_none_for_dead_pid() {
-        // PID 0 is not a real user process to `ps -p`, so sampling yields None.
-        assert_eq!(sample_process_memory_mb(0), None);
+        // Use a PID beyond every mainstream kernel's default pid ceiling
+        // (Linux pid_max default 4M/32k, macOS ~99998, BSDs 99999): PID 0 is
+        // kernel_task on macOS and semantically special to `ps -p`, so it is
+        // not a portable "no such process" probe.
+        assert_eq!(sample_process_memory_mb(999_999_999), None);
     }
 
     fn shell_command(script: &str) -> FleetWorkerCommand {
