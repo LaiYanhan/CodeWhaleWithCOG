@@ -27,6 +27,23 @@ RUSTFLAGS="-D warnings" cargo test -p codewhale-tui --bin codewhale-tui --locked
 cargo test -p codewhale-config --lib
 ```
 
+## Automated Headless Probe
+
+`scripts/v0867-setup-qa.sh` runs the noninteractive contracts below against
+isolated temp homes and exits non-zero on any regression (requires `jq`):
+
+```sh
+scripts/v0867-setup-qa.sh                       # builds release if needed
+CODEWHALE_BIN=target/release/codewhale-tui scripts/v0867-setup-qa.sh
+```
+
+It verifies: the `doctor --json .setup` block shape and
+`next_actions.constitution`, that a configured key never appears in
+`doctor --json`, that a repo `.codewhale/constitution.json` surfaces in
+`--context-json`, and that a legacy `WHALE.md` body is never loaded. It
+prints the remaining human-visual checks it cannot cover. This shrinks the
+manual pass to the visual items enumerated in the Text Snapshot Checklist.
+
 ## Hermetic Local Setup
 
 Use temp homes so the matrix does not read or mutate a real install:
