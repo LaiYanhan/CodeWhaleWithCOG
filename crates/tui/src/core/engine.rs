@@ -3905,10 +3905,13 @@ mod approval;
 mod context;
 mod handle;
 pub(crate) use context::compact_tool_result_for_context;
+/// Public so external hosts/wrappers can reuse the engine's input-budget math
+/// (see `context_input_budget_for_route`'s doc) instead of re-deriving it.
+pub use context::context_input_budget_for_route;
 #[cfg(test)]
 use context::route_context_budget_for_provider;
 use context::{
-    MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP, context_input_budget_for_route,
+    MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP,
     effective_max_output_tokens_for_route, estimate_input_tokens_conservative,
     extract_compaction_summary_prompt, is_context_length_error_message,
     route_context_budget_for_route, summarize_text,
