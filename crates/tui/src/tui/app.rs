@@ -14,6 +14,8 @@ use codewhale_config::{ProviderChain, route::RouteLimits};
 
 use crate::artifacts::ArtifactRecord;
 use crate::client::{CacheWarmupKey, PromptInspection};
+use crate::cog_recommender::collector::RawEventCollector;
+use crate::cog_recommender::visualization_web::spawn_visualization_from_env;
 use crate::compaction::CompactionConfig;
 use crate::config::{
     ApiProvider, Config, DEFAULT_TEXT_MODEL, SavedCredential, has_api_key, has_api_key_for,
@@ -2184,6 +2186,8 @@ pub struct App {
     pub receipt_started_at: Option<Instant>,
     /// Tool evidence collected during the current turn for the receipt.
     pub tool_evidence: Vec<ToolEvidence>,
+    /// Raw Agent tool-event collector for the COG recommender pipeline.
+    pub cog_recommender_collector: RawEventCollector,
 }
 
 /// Message queued while the engine is busy.
@@ -2647,6 +2651,9 @@ impl App {
             &model,
             &provider_models,
         );
+        spawn_visualization_from_env(workspace.clone());
+        let cog_recommender_collector =
+            RawEventCollector::open_at_workspace(&workspace).unwrap_or_default();
         Self {
             mode: initial_mode,
             hotbar_actions,
@@ -2921,6 +2928,7 @@ impl App {
             receipt_text: None,
             receipt_started_at: None,
             tool_evidence: Vec::new(),
+            cog_recommender_collector,
         }
     }
 

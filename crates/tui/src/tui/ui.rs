@@ -46,6 +46,7 @@ use crate::client::{
     CacheWarmupKey, DeepSeekClient, PromptInspection, build_cache_warmup_request,
     inspect_prompt_for_request,
 };
+use crate::cog_recommender::types::ToolEventStatus;
 use crate::commands;
 use crate::compaction::estimate_input_tokens_conservative;
 use crate::config::{
@@ -2304,6 +2305,13 @@ async fn run_event_loop(
                     EngineEvent::ToolCallStarted { id, name, input } => {
                         app.pending_tool_uses
                             .push((id.clone(), name.clone(), input.clone()));
+                        app.cog_recommender_collector.record_tool_call_started(
+                            id.clone(),
+                            app.current_session_id.clone().unwrap_or_default(),
+                            app.runtime_turn_id.clone().unwrap_or_default(),
+                            name.clone(),
+                            input.clone(),
+                        );
                         // Note this dispatch so the next sub-agent `Started`
                         // mailbox envelope routes into the right card kind
                         // (delegate vs fanout).
@@ -2325,6 +2333,28 @@ async fn run_event_loop(
                         if name == "update_plan" {
                             app.plan_tool_used_in_turn = true;
                         }
+                        let (output_summary, recommender_status) = match &result {
+                            Ok(output) => (
+                                summarize_tool_output(&output.content),
+                                if output.success {
+                                    ToolEventStatus::Success
+                                } else {
+                                    ToolEventStatus::Error
+                                },
+                            ),
+                            Err(err) => (
+                                summarize_tool_output(&err.to_string()),
+                                ToolEventStatus::Error,
+                            ),
+                        };
+                        app.cog_recommender_collector.record_tool_call_completed(
+                            &id,
+                            app.current_session_id.clone().unwrap_or_default(),
+                            app.runtime_turn_id.clone().unwrap_or_default(),
+                            name.clone(),
+                            output_summary,
+                            recommender_status,
+                        );
                         if is_model_visible_tool_call(&id) {
                             let tool_content = match &result {
                                 Ok(output) => sanitize_stream_chunk(
@@ -2409,6 +2439,7 @@ async fn run_event_loop(
                         app.runtime_turn_id = Some(turn_id);
                         app.runtime_turn_status = Some("in_progress".to_string());
                         app.turn_counter = app.turn_counter.saturating_add(1);
+                        app.cog_recommender_collector.clear_pending();
                         app.reasoning_buffer.clear();
                         app.reasoning_header = None;
                         app.last_reasoning = None;

@@ -26,6 +26,7 @@ mod auto_reasoning;
 mod automation_manager;
 mod child_env;
 mod client;
+mod cog_recommender;
 mod command_safety;
 mod commands;
 mod compaction;
