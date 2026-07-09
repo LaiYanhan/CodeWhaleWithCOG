@@ -1,20 +1,23 @@
-use std::collections::HashMap;
-
+use super::algorithms::RecommendationAlgorithm;
+use super::algorithms::weighted_v1::WeightedV1Algorithm;
+use super::candidate_sources::CandidateSources;
 use super::cog_adapter::CogAdapter;
 use super::config::RecommenderConfig;
 use super::graph::TrajectoryGraph;
-use super::types::{
-    Candidate, EntityRef, Evidence, EvidenceSource, Recommendation, SuggestedAction,
-    TrajectoryEvent,
-};
+use super::recommendation_context::RecommendationContext;
+use super::types::{Evidence, Recommendation, TrajectoryEvent};
 
 pub struct Recommender {
     config: RecommenderConfig,
+    algorithm: WeightedV1Algorithm,
 }
 
 impl Recommender {
     pub fn new(config: RecommenderConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            algorithm: WeightedV1Algorithm,
+        }
     }
 
     pub fn recommend(
@@ -23,142 +26,148 @@ impl Recommender {
         adapter: &impl CogAdapter,
         graph: &TrajectoryGraph,
     ) -> Vec<Recommendation> {
+        self.recommend_with_recent_events(trigger, adapter, graph, Vec::new())
+    }
+
+    pub fn recommend_with_recent_events(
+        &self,
+        trigger: &TrajectoryEvent,
+        adapter: &impl CogAdapter,
+        graph: &TrajectoryGraph,
+        recent_events: Vec<TrajectoryEvent>,
+    ) -> Vec<Recommendation> {
         let Some(current) = trigger.entity_ref.as_ref() else {
             return Vec::new();
         };
 
+        let cog_evidence = collect_cog_evidence(current, adapter);
+        let trajectory_evidence = graph.evidence_for(current);
+        let context = RecommendationContext::new(trigger.clone(), self.config.clone())
+            .with_recent_events(recent_events)
+            .with_cog_evidence(cog_evidence.clone())
+            .with_trajectory_evidence(trajectory_evidence.clone());
         let mut candidates = Vec::new();
-        candidates.extend(self.candidates_from_evidence(trigger, adapter.impact(current)));
-        candidates.extend(self.candidates_from_evidence(trigger, adapter.related(current)));
-        candidates.extend(self.candidates_from_evidence(trigger, adapter.assertions(current)));
-        candidates.extend(self.candidates_from_evidence(trigger, graph.evidence_for(current)));
+        candidates.extend(CandidateSources::from_evidence(&trigger.id, cog_evidence));
+        candidates.extend(CandidateSources::from_evidence(
+            &trigger.id,
+            trajectory_evidence,
+        ));
 
-        self.rank(candidates)
-    }
-
-    fn candidates_from_evidence(
-        &self,
-        trigger: &TrajectoryEvent,
-        evidence: Vec<Evidence>,
-    ) -> Vec<Candidate> {
-        evidence
-            .into_iter()
-            .map(|evidence| Candidate {
-                entity: evidence.target.clone(),
-                trigger_event_id: trigger.id.clone(),
-                evidence: vec![evidence],
-            })
-            .collect()
-    }
-
-    fn rank(&self, candidates: Vec<Candidate>) -> Vec<Recommendation> {
-        let mut merged: HashMap<String, Candidate> = HashMap::new();
-        for candidate in candidates {
-            merged
-                .entry(candidate.entity.qualified_name.clone())
-                .and_modify(|existing| existing.evidence.extend(candidate.evidence.clone()))
-                .or_insert(candidate);
-        }
-
-        let mut recommendations: Vec<Recommendation> = merged
-            .into_values()
-            .filter_map(|candidate| self.to_recommendation(candidate))
-            .collect();
-        recommendations.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.entity.qualified_name.cmp(&b.entity.qualified_name))
-        });
-        recommendations.truncate(self.config.max_recommendations);
-        recommendations
-    }
-
-    fn to_recommendation(&self, candidate: Candidate) -> Option<Recommendation> {
-        if candidate.evidence.is_empty() {
-            return None;
-        }
-        let score: f64 = candidate
-            .evidence
-            .iter()
-            .map(|evidence| self.weighted_score(evidence))
-            .sum();
-        if score < self.config.min_score {
-            return None;
-        }
-        let display_text = format_display(&candidate.entity, &candidate.evidence);
-        Some(Recommendation {
-            entity: candidate.entity,
-            score,
-            evidence: candidate.evidence,
-            suggested_action: SuggestedAction::Read,
-            display_text,
-        })
-    }
-
-    fn weighted_score(&self, evidence: &Evidence) -> f64 {
-        let multiplier = match evidence.source {
-            EvidenceSource::CogImpact | EvidenceSource::CogRelation => self.config.cog_graph_weight,
-            EvidenceSource::CoAccess
-            | EvidenceSource::ReadBeforeEdit
-            | EvidenceSource::SearchToRead
-            | EvidenceSource::EditToTest
-            | EvidenceSource::CogWriteToEdit => self.config.trajectory_weight,
-            EvidenceSource::SearchToEdit => self.config.search_weight,
-            EvidenceSource::ErrorToEdit => self.config.error_weight,
-            EvidenceSource::Rule => self.config.risk_weight,
-            EvidenceSource::Assertion => self.config.risk_weight,
-        };
-        evidence.weight * multiplier
+        self.algorithm.recommend(&context, candidates)
     }
 }
 
-fn format_display(entity: &EntityRef, evidence: &[Evidence]) -> String {
-    let reasons: Vec<&str> = evidence
-        .iter()
-        .map(|evidence| evidence.reason.as_str())
-        .filter(|reason| !reason.is_empty())
-        .take(3)
-        .collect();
-    if reasons.is_empty() {
-        format!("Consider {}", entity.qualified_name)
-    } else {
-        format!("Consider {}: {}", entity.qualified_name, reasons.join("; "))
-    }
+fn collect_cog_evidence(
+    entity: &super::types::EntityRef,
+    adapter: &impl CogAdapter,
+) -> Vec<Evidence> {
+    let mut evidence = Vec::new();
+    evidence.extend(adapter.impact(entity));
+    evidence.extend(adapter.related(entity));
+    evidence.extend(adapter.assertions(entity));
+    evidence
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cog_recommender::types::{EntityRef, EvidenceSource};
+    use crate::cog_recommender::candidate_sources::CandidateSources;
+    use crate::cog_recommender::cog_adapter::StaticCogAdapter;
+    use crate::cog_recommender::graph::TrajectoryGraph;
+    use crate::cog_recommender::recommendation_context::RecommendationContext;
+    use crate::cog_recommender::types::{
+        EntityKind, EntityRef, EvidenceSource, TrajectoryEvent, TrajectoryKind,
+    };
+    use serde_json::Value;
 
     #[test]
     fn rank_merges_duplicate_candidates() {
         let target = EntityRef::new("target");
-        let candidate_a = Candidate {
-            entity: target.clone(),
-            trigger_event_id: "evt".into(),
-            evidence: vec![Evidence::new(
+        let mut candidates = CandidateSources::from_evidence(
+            "evt",
+            vec![Evidence::new(
                 EvidenceSource::CogImpact,
                 target.clone(),
                 0.4,
                 "impact",
             )],
-        };
-        let candidate_b = Candidate {
-            entity: target.clone(),
-            trigger_event_id: "evt".into(),
-            evidence: vec![Evidence::new(
+        );
+        candidates.extend(CandidateSources::from_evidence(
+            "evt",
+            vec![Evidence::new(
                 EvidenceSource::CoAccess,
                 target,
                 0.3,
                 "co-access",
             )],
-        };
+        ));
 
-        let ranked =
-            Recommender::new(RecommenderConfig::default()).rank(vec![candidate_a, candidate_b]);
+        let ranked = WeightedV1Algorithm.recommend(
+            &RecommendationContext::new(trigger(), RecommenderConfig::default()),
+            candidates,
+        );
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].evidence.len(), 2);
+    }
+
+    #[test]
+    fn recommend_with_recent_events_penalizes_session_seen_entity() {
+        let current = entity("current");
+        let seen = entity("seen");
+        let fresh = entity("fresh");
+        let trigger = event("trigger", TrajectoryKind::ReadEntity, Some(current.clone()));
+        let recent_seen = event("seen-event", TrajectoryKind::ReadEntity, Some(seen.clone()));
+        let mut graph = TrajectoryGraph::default();
+        graph.observe_edge(
+            &current,
+            &seen,
+            EvidenceSource::CogImpact,
+            1.0,
+            "seen impact",
+        );
+        graph.observe_edge(
+            &current,
+            &fresh,
+            EvidenceSource::CogImpact,
+            1.0,
+            "fresh impact",
+        );
+
+        let ranked = Recommender::new(RecommenderConfig::default()).recommend_with_recent_events(
+            &trigger,
+            &StaticCogAdapter::new(),
+            &graph,
+            vec![recent_seen],
+        );
+
+        assert_eq!(ranked[0].entity.qualified_name, "fresh");
+    }
+
+    fn trigger() -> TrajectoryEvent {
+        event(
+            "evt",
+            TrajectoryKind::ReadEntity,
+            Some(EntityRef::new("current")),
+        )
+    }
+
+    fn event(id: &str, kind: TrajectoryKind, entity_ref: Option<EntityRef>) -> TrajectoryEvent {
+        TrajectoryEvent {
+            id: id.into(),
+            raw_event_id: format!("raw-{id}"),
+            session_id: "session".into(),
+            kind,
+            entity_ref,
+            file_path: None,
+            line_range: None,
+            payload: Value::Null,
+            confidence: 0.8,
+        }
+    }
+
+    fn entity(name: &str) -> EntityRef {
+        EntityRef::new(name)
+            .with_kind(EntityKind::Function)
+            .with_confidence(0.8)
     }
 }

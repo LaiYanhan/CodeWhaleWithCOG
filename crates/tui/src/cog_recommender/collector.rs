@@ -13,7 +13,7 @@ use super::storage::{
     DEFAULT_RECOMMENDER_DB_NAME, InMemoryStore, SqliteTrajectoryRepository, TrajectoryRepository,
     TrajectorySnapshot,
 };
-use super::types::{RawToolEvent, ToolEventOrigin, ToolEventStatus};
+use super::types::{RawToolEvent, ToolEventOrigin, ToolEventStatus, TrajectoryEvent};
 
 #[derive(Debug, Clone)]
 struct PendingRawToolCall {
@@ -190,6 +190,18 @@ impl RawEventCollector {
 
     pub fn graph(&self) -> &TrajectoryGraph {
         &self.graph
+    }
+
+    pub fn recent_trajectory_events(&self, limit: usize) -> Vec<TrajectoryEvent> {
+        if let Some(sqlite) = self.sqlite.as_ref()
+            && let Ok(events) = sqlite.list_recent_trajectory_events(limit)
+        {
+            return events;
+        }
+        let mut events = self.store.trajectory_events.clone();
+        events.reverse();
+        events.truncate(limit);
+        events
     }
 
     pub fn persistence_errors(&self) -> &[String] {
@@ -579,5 +591,45 @@ mod tests {
         assert_eq!(snapshot.trajectory_events.len(), 2);
         assert!(!snapshot.trajectory_edges.is_empty());
         assert!(snapshot.persistence_errors.is_empty());
+    }
+
+    #[test]
+    fn collector_exposes_recent_trajectory_events_for_recommendation_context() {
+        let mut collector = RawEventCollector::default();
+        collector.record_tool_call_started(
+            "read-call",
+            "session",
+            "turn",
+            "read_file",
+            json!({"path": "src/config.rs"}),
+        );
+        collector.record_tool_call_completed(
+            "read-call",
+            "session",
+            "turn",
+            "read_file",
+            "ok",
+            ToolEventStatus::Success,
+        );
+        collector.record_tool_call_started(
+            "edit-call",
+            "session",
+            "turn",
+            "apply_patch",
+            json!({"path": "src/main.rs"}),
+        );
+        collector.record_tool_call_completed(
+            "edit-call",
+            "session",
+            "turn",
+            "apply_patch",
+            "patched",
+            ToolEventStatus::Success,
+        );
+
+        let recent = collector.recent_trajectory_events(1);
+
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].kind, TrajectoryKind::EditEntity);
     }
 }

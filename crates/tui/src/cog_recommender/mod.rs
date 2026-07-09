@@ -6,12 +6,16 @@
 
 #![allow(dead_code)]
 
+pub mod algorithms;
+pub mod candidate_sources;
 pub mod cog_adapter;
 pub mod collector;
 pub mod config;
 pub mod feedback;
 pub mod graph;
 pub mod normalizer;
+pub mod recommendation_context;
+pub mod recommendation_summary;
 pub mod recommender;
 pub mod resolver;
 pub mod storage;

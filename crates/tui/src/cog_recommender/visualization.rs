@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::storage::DEFAULT_RECOMMENDER_DB_NAME;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VisualizationScope {
     Turn,
