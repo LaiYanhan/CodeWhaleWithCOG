@@ -2,15 +2,15 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-#[cfg(test)]
 use rusqlite::OptionalExtension;
 use rusqlite::{Connection, Row, params};
 use serde::{Serialize, de::DeserializeOwned};
 
+use super::config::RecommenderConfig;
 use super::graph::EdgeStats;
 use super::types::{
-    EntityRef, EvidenceSource, LineRange, RawToolEvent, Recommendation, ToolEventOrigin,
-    ToolEventStatus, TrajectoryEvent, TrajectoryKind,
+    EntityRef, EvidenceSource, LineRange, RawToolEvent, Recommendation, RecommendationFeedback,
+    StoredRecommendation, ToolEventOrigin, ToolEventStatus, TrajectoryEvent, TrajectoryKind,
 };
 
 pub const DEFAULT_RECOMMENDER_DB_NAME: &str = "recommender.db";
@@ -55,12 +55,62 @@ CREATE TABLE IF NOT EXISTS trajectory_edges (
     PRIMARY KEY (source_entity, target_entity, edge_type)
 );
 
+CREATE TABLE IF NOT EXISTS recommendations (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    trigger_event_ids_json TEXT NOT NULL,
+    target_entity TEXT NOT NULL,
+    entity_json TEXT NOT NULL,
+    suggested_action TEXT NOT NULL,
+    score REAL NOT NULL,
+    display_text TEXT NOT NULL,
+    recommendation_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'exposed', 'completed', 'expired')),
+    created_at TEXT NOT NULL,
+    last_triggered_at TEXT NOT NULL,
+    exposed_at TEXT,
+    expires_at TEXT NOT NULL,
+    trigger_tool_index INTEGER NOT NULL,
+    exposed_turn_index INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS recommendation_evidence (
+    id TEXT PRIMARY KEY,
+    recommendation_id TEXT NOT NULL REFERENCES recommendations(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    weight REAL NOT NULL,
+    target_entity TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS recommendation_feedback (
+    id TEXT PRIMARY KEY,
+    recommendation_id TEXT NOT NULL REFERENCES recommendations(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    event_id TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS recommender_runtime_config (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    config_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tool_events_session ON tool_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_events_turn ON tool_events(turn_id);
 CREATE INDEX IF NOT EXISTS idx_trajectory_events_session ON trajectory_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_trajectory_events_raw ON trajectory_events(raw_event_id);
 CREATE INDEX IF NOT EXISTS idx_trajectory_edges_source ON trajectory_edges(source_entity);
 CREATE INDEX IF NOT EXISTS idx_trajectory_edges_target ON trajectory_edges(target_entity);
+CREATE INDEX IF NOT EXISTS idx_recommendations_session_status
+    ON recommendations(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_recommendation_feedback_recommendation
+    ON recommendation_feedback(recommendation_id);
 "#;
 
 #[derive(Debug, Default)]
@@ -131,6 +181,9 @@ impl SqliteTrajectoryRepository {
             "tool_events" => "SELECT COUNT(*) FROM tool_events",
             "trajectory_events" => "SELECT COUNT(*) FROM trajectory_events",
             "trajectory_edges" => "SELECT COUNT(*) FROM trajectory_edges",
+            "recommendations" => "SELECT COUNT(*) FROM recommendations",
+            "recommendation_evidence" => "SELECT COUNT(*) FROM recommendation_evidence",
+            "recommendation_feedback" => "SELECT COUNT(*) FROM recommendation_feedback",
             _ => anyhow::bail!("unknown table: {table}"),
         };
         let count: i64 = self.conn.query_row(sql, [], |row| row.get(0))?;
@@ -169,6 +222,114 @@ impl SqliteTrajectoryRepository {
     #[cfg(test)]
     pub fn count_edges(&self) -> Result<u64> {
         self.count_rows("trajectory_edges")
+    }
+
+    pub fn upsert_recommendation(&self, value: &StoredRecommendation) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO recommendations
+             (id, session_id, turn_id, trigger_event_ids_json, target_entity, entity_json,
+              suggested_action, score, display_text, recommendation_json, status, created_at,
+              last_triggered_at, exposed_at, expires_at, trigger_tool_index, exposed_turn_index)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ON CONFLICT(id) DO UPDATE SET
+               trigger_event_ids_json = excluded.trigger_event_ids_json,
+               score = excluded.score,
+               display_text = excluded.display_text,
+               recommendation_json = excluded.recommendation_json,
+               status = excluded.status,
+               last_triggered_at = excluded.last_triggered_at,
+               exposed_at = excluded.exposed_at,
+               expires_at = excluded.expires_at,
+               exposed_turn_index = excluded.exposed_turn_index",
+            params![
+                value.id,
+                value.session_id,
+                value.turn_id,
+                to_json(&value.trigger_event_ids)?,
+                value.recommendation.entity.qualified_name,
+                to_json(&value.recommendation.entity)?,
+                to_enum_text(&value.recommendation.suggested_action)?,
+                value.recommendation.score,
+                value.recommendation.display_text,
+                to_json(&value.recommendation)?,
+                to_enum_text(&value.status)?,
+                value.created_at.to_rfc3339(),
+                value.last_triggered_at.to_rfc3339(),
+                value.exposed_at.map(|ts| ts.to_rfc3339()),
+                value.expires_at.to_rfc3339(),
+                i64::try_from(value.trigger_tool_index).unwrap_or(i64::MAX),
+                value
+                    .exposed_turn_index
+                    .map(|index| i64::try_from(index).unwrap_or(i64::MAX)),
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM recommendation_evidence WHERE recommendation_id = ?1",
+            [&value.id],
+        )?;
+        for (index, evidence) in value.recommendation.evidence.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO recommendation_evidence
+                 (id, recommendation_id, source, weight, target_entity, reason, payload_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    format!("{}:{index}", value.id),
+                    value.id,
+                    to_enum_text(&evidence.source)?,
+                    evidence.weight,
+                    evidence.target.qualified_name,
+                    evidence.reason,
+                    to_json(&evidence.payload)?,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn record_recommendation_feedback(&self, value: &RecommendationFeedback) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO recommendation_feedback
+             (id, recommendation_id, session_id, turn_id, kind, event_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                value.id,
+                value.recommendation_id,
+                value.session_id,
+                value.turn_id,
+                to_enum_text(&value.kind)?,
+                value.event_id,
+                value.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_runtime_config(&self) -> Result<RecommenderConfig> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT config_json FROM recommender_runtime_config WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value
+            .map(|json| from_json(&json))
+            .unwrap_or_else(|| Ok(RecommenderConfig::default()))
+    }
+
+    pub fn save_runtime_config(&self, config: &RecommenderConfig) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO recommender_runtime_config (id, config_json, updated_at)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET
+               config_json = excluded.config_json,
+               updated_at = excluded.updated_at",
+            params![to_json(config)?, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
     }
 }
 
@@ -426,8 +587,9 @@ mod tests {
     use super::*;
     use crate::cog_recommender::graph::EdgeStats;
     use crate::cog_recommender::types::{
-        EntityRef, EvidenceSource, RawToolEvent, ToolEventOrigin, ToolEventStatus, TrajectoryEvent,
-        TrajectoryKind,
+        EntityRef, Evidence, EvidenceSource, RawToolEvent, Recommendation,
+        RecommendationFeedbackKind, RecommendationStatus, StoredRecommendation, SuggestedAction,
+        ToolEventOrigin, ToolEventStatus, TrajectoryEvent, TrajectoryKind,
     };
 
     #[test]
@@ -489,5 +651,57 @@ mod tests {
             repo.get_edge_count("A", "B", "read_before_edit").unwrap(),
             Some(2)
         );
+    }
+
+    #[test]
+    fn sqlite_repository_persists_recommendations_feedback_and_config() {
+        let repo = SqliteTrajectoryRepository::open_in_memory().expect("repo");
+        let now = Utc::now();
+        let entity = EntityRef::new("inventory::api::get_stock");
+        let stored = StoredRecommendation {
+            id: "recommendation-1".into(),
+            session_id: "session".into(),
+            turn_id: "turn".into(),
+            trigger_event_ids: vec!["event-1".into()],
+            recommendation: Recommendation {
+                entity: entity.clone(),
+                score: 0.8,
+                evidence: vec![Evidence::new(
+                    EvidenceSource::CogImpact,
+                    entity,
+                    0.8,
+                    "affected caller",
+                )],
+                suggested_action: SuggestedAction::Read,
+                display_text: "Read affected caller".into(),
+            },
+            status: RecommendationStatus::Pending,
+            created_at: now,
+            last_triggered_at: now,
+            exposed_at: None,
+            expires_at: now + chrono::Duration::minutes(15),
+            trigger_tool_index: 1,
+            exposed_turn_index: None,
+        };
+        repo.upsert_recommendation(&stored).expect("recommendation");
+        repo.record_recommendation_feedback(&RecommendationFeedback {
+            id: "feedback-1".into(),
+            recommendation_id: stored.id.clone(),
+            session_id: stored.session_id.clone(),
+            turn_id: stored.turn_id.clone(),
+            kind: RecommendationFeedbackKind::Exposed,
+            event_id: None,
+            created_at: now,
+        })
+        .expect("feedback");
+
+        let mut config = RecommenderConfig::default();
+        config.max_recommendations = 3;
+        repo.save_runtime_config(&config).expect("save config");
+
+        assert_eq!(repo.count_rows("recommendations").unwrap(), 1);
+        assert_eq!(repo.count_rows("recommendation_evidence").unwrap(), 1);
+        assert_eq!(repo.count_rows("recommendation_feedback").unwrap(), 1);
+        assert_eq!(repo.load_runtime_config().unwrap().max_recommendations, 3);
     }
 }

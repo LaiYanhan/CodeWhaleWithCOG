@@ -127,6 +127,9 @@ impl RecommendationSummaryStore {
         if records.is_empty() {
             warnings.push("no recommendation records available".to_string());
         }
+        aggregate_projection_warnings(&mut warnings);
+        warnings.sort();
+        warnings.dedup();
 
         RecommendationSummary {
             scope,
@@ -156,6 +159,34 @@ impl RecommendationSummaryStore {
         }
         load_cog_entities_from_db(&path)
     }
+}
+
+fn aggregate_projection_warnings(warnings: &mut Vec<String>) {
+    const PREFIX: &str = "trajectory target '";
+    let mut targets = warnings
+        .iter()
+        .filter(|warning| warning.starts_with(PREFIX))
+        .filter_map(|warning| warning.strip_prefix(PREFIX))
+        .filter_map(|warning| warning.split('\'').next())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        return;
+    }
+    warnings.retain(|warning| !warning.starts_with(PREFIX));
+    let examples = targets
+        .iter()
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    warnings.push(format!(
+        "{} stale or temporary trajectory target(s) were skipped because they are absent from the current COG graph. Examples: {}",
+        targets.len(),
+        examples
+    ));
 }
 
 fn records_from_edges(
@@ -273,6 +304,10 @@ fn project_observed_target_to_cog_entities(
         return Vec::new();
     };
     let normalized_path = normalize_entity_like_path(path_like);
+    let file_stem = Path::new(path_like)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
     let mut candidates = cog_entities
         .iter()
         .filter(|entity| is_recommendable_entity(entity))
@@ -288,7 +323,24 @@ fn project_observed_target_to_cog_entities(
     candidates.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));
     candidates.dedup_by(|left, right| left.qualified_name == right.qualified_name);
     if candidates.len() > 25 {
-        return Vec::new();
+        let module_candidates = candidates
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Module)
+            .filter(|entity| {
+                file_stem.as_deref().is_some_and(|stem| {
+                    normalize_entity_name(&entity.qualified_name)
+                        .rsplit("::")
+                        .next()
+                        == Some(stem)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if module_candidates.len() == 1 {
+            candidates = module_candidates;
+        } else {
+            return Vec::new();
+        }
     }
     candidates
         .into_iter()
@@ -606,8 +658,71 @@ mod tests {
             summary
                 .warnings
                 .iter()
-                .any(|warning| { warning.contains("could not be projected to COG code entities") })
+                .any(|warning| { warning.contains("stale or temporary trajectory target") })
         );
+    }
+
+    #[test]
+    fn summary_projects_absolute_path_for_large_file_to_exact_module_once() {
+        let workspace = tempdir().expect("workspace");
+        let mut rows = vec![("module-main", "main", "module")];
+        let owned = (0..30)
+            .map(|index| {
+                (
+                    format!("method-{index}"),
+                    format!("main::Window::handler_{index}"),
+                    "method".to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let owned_refs = owned
+            .iter()
+            .map(|(id, name, kind)| (id.as_str(), name.as_str(), kind.as_str()))
+            .collect::<Vec<_>>();
+        rows.extend(owned_refs);
+        write_cog_entities(workspace.path(), &rows);
+
+        let db_path = workspace
+            .path()
+            .join(".cog")
+            .join(DEFAULT_RECOMMENDER_DB_NAME);
+        let repo = SqliteTrajectoryRepository::open(&db_path).expect("repo");
+        let source = entity("search:main");
+        let target = EntityRef::new(r"D:\project\game_translator\main.py")
+            .with_kind(EntityKind::File)
+            .with_file_path(r"D:\project\game_translator\main.py")
+            .with_confidence(0.4);
+        let mut graph = TrajectoryGraph::default();
+        for edge_type in [EvidenceSource::SearchToEdit, EvidenceSource::CoAccess] {
+            let edge = graph.observe_edge(&source, &target, edge_type, 0.5, "observed main.py");
+            repo.upsert_trajectory_edge(&edge).expect("edge");
+        }
+
+        let summary = RecommendationSummaryStore::new(workspace.path())
+            .load_summary(VisualizationScope::Session, 100);
+
+        assert_eq!(summary.records.len(), 1);
+        assert_eq!(summary.records[0].entity.qualified_name, "main");
+        assert!(
+            summary
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("could not be projected"))
+        );
+    }
+
+    #[test]
+    fn summary_aggregates_unprojectable_targets_into_one_warning() {
+        let mut warnings = vec![
+            "trajectory target '_a.py' could not be projected to COG code entities".to_string(),
+            "trajectory target '_a.py' could not be projected to COG code entities".to_string(),
+            "trajectory target '_b.py' could not be projected to COG code entities".to_string(),
+        ];
+        aggregate_projection_warnings(&mut warnings);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("2 stale or temporary"));
+        assert!(warnings[0].contains("_a.py"));
+        assert!(warnings[0].contains("_b.py"));
     }
 
     fn entity(name: &str) -> EntityRef {

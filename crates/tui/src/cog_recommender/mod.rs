@@ -18,6 +18,7 @@ pub mod recommendation_context;
 pub mod recommendation_summary;
 pub mod recommender;
 pub mod resolver;
+pub mod runtime;
 pub mod storage;
 pub mod types;
 pub mod visualization;

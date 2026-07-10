@@ -11,7 +11,9 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 
+use super::config::RecommenderConfig;
 use super::recommendation_summary::{RecommendationSummary, RecommendationSummaryStore};
+use super::storage::{DEFAULT_RECOMMENDER_DB_NAME, SqliteTrajectoryRepository};
 use super::visualization::{VisualizationScope, VisualizationStore};
 
 const DEFAULT_LIMIT: usize = 200;
@@ -20,6 +22,7 @@ const DEFAULT_LIMIT: usize = 200;
 struct VisualizationState {
     store: VisualizationStore,
     recommendation_store: RecommendationSummaryStore,
+    workspace: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,12 +45,17 @@ pub fn visualization_router(workspace: impl Into<PathBuf>) -> Router {
     let workspace = workspace.into();
     let state = VisualizationState {
         store: VisualizationStore::new(workspace.clone()),
-        recommendation_store: RecommendationSummaryStore::new(workspace),
+        recommendation_store: RecommendationSummaryStore::new(workspace.clone()),
+        workspace,
     };
     Router::new()
         .route("/", get(index))
         .route("/api/visualization/session-graph", get(session_graph))
         .route("/api/recommendations/summary", get(recommendation_summary))
+        .route(
+            "/api/recommendations/runtime-config",
+            get(recommendation_runtime_config).put(update_recommendation_runtime_config),
+        )
         .with_state(Arc::new(state))
 }
 
@@ -109,6 +117,38 @@ async fn recommendation_summary(
             .recommendation_store
             .load_summary(query.scope, query.limit.unwrap_or(DEFAULT_LIMIT)),
     )
+}
+
+async fn recommendation_runtime_config(
+    State(state): State<Arc<VisualizationState>>,
+) -> Json<RecommenderConfig> {
+    Json(load_runtime_config(&state.workspace))
+}
+
+async fn update_recommendation_runtime_config(
+    State(state): State<Arc<VisualizationState>>,
+    Json(mut config): Json<RecommenderConfig>,
+) -> Json<RecommenderConfig> {
+    config.max_recommendations = config.max_recommendations.clamp(1, 10);
+    config.max_total_chars = config.max_total_chars.clamp(200, 4000);
+    config.max_reason_chars = config.max_reason_chars.clamp(40, 500);
+    config.max_injections_per_turn = config.max_injections_per_turn.clamp(1, 3);
+    config.min_injection_score = config.min_injection_score.clamp(0.0, 1.0);
+    let path = state
+        .workspace
+        .join(".cog")
+        .join(DEFAULT_RECOMMENDER_DB_NAME);
+    if let Ok(repository) = SqliteTrajectoryRepository::open(&path) {
+        let _ = repository.save_runtime_config(&config);
+    }
+    Json(config)
+}
+
+fn load_runtime_config(workspace: &std::path::Path) -> RecommenderConfig {
+    let path = workspace.join(".cog").join(DEFAULT_RECOMMENDER_DB_NAME);
+    SqliteTrajectoryRepository::open(&path)
+        .and_then(|repository| repository.load_runtime_config())
+        .unwrap_or_default()
 }
 
 const INDEX_HTML: &str = r#"<!doctype html>
@@ -547,6 +587,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let graphData = null;
     let recommendationSummary = null;
     let currentWeights = {};
+    let activeGraphSignature = '';
 
     const scopeEl = document.getElementById('scope');
     const containsEl = document.getElementById('contains');
@@ -585,8 +626,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <button id="reset-weights" class="secondary-button">Reset</button>
               </div>
               <label class="topk-control">Top-K
-                <input id="top-k" type="number" min="1" max="50" value="5" />
+                <input id="top-k" type="number" min="1" max="10" value="5" />
               </label>
+              <label class="topk-control">Context characters
+                <input id="runtime-max-chars" type="number" min="200" max="4000" value="1200" />
+              </label>
+              <label class="toggle-line">
+                <input id="runtime-enabled" type="checkbox" checked />
+                <span>Inject into Agent context</span>
+              </label>
+              <button id="apply-runtime-config" class="secondary-button">Apply to Agent</button>
+              <div id="runtime-config-status" class="ranking-meta"></div>
               <div id="weight-grid" class="weight-grid"></div>
             </aside>
             <section class="ranking-results">
@@ -648,6 +698,34 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }
       renderWeightControls();
       renderRecommendationRanking();
+      await loadRuntimeConfig();
+    }
+
+    async function loadRuntimeConfig() {
+      const res = await fetch('/api/recommendations/runtime-config');
+      if (!res.ok) return;
+      const config = await res.json();
+      const topK = document.getElementById('top-k');
+      const maxChars = document.getElementById('runtime-max-chars');
+      const enabled = document.getElementById('runtime-enabled');
+      if (topK) topK.value = String(config.max_recommendations || 5);
+      if (maxChars) maxChars.value = String(config.max_total_chars || 1200);
+      if (enabled) enabled.checked = config.enabled !== false;
+      renderRecommendationRanking();
+    }
+
+    async function applyRuntimeConfig() {
+      const status = document.getElementById('runtime-config-status');
+      const current = await fetch('/api/recommendations/runtime-config').then(res => res.json());
+      current.max_recommendations = Math.max(1, Math.min(10, Number(document.getElementById('top-k')?.value || 5)));
+      current.max_total_chars = Math.max(200, Math.min(4000, Number(document.getElementById('runtime-max-chars')?.value || 1200)));
+      current.enabled = document.getElementById('runtime-enabled')?.checked !== false;
+      const res = await fetch('/api/recommendations/runtime-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(current)
+      });
+      if (status) status.textContent = res.ok ? 'Applied to the next recommendation trigger.' : 'Failed to update runtime config.';
     }
 
     function renderWeightControls() {
@@ -803,11 +881,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function renderGraph() {
       const modified = new Set(graphData.modified_entities || []);
       const impacted = new Set(graphData.impacted_entities || []);
+      activeGraphSignature = graphSignature(graphData);
+      const cachedPositions = loadGraphPositions(activeGraphSignature);
       const elements = [];
-      for (const entity of graphData.entities || []) {
+      const entities = graphData.entities || [];
+      for (let index = 0; index < entities.length; index += 1) {
+        const entity = entities[index];
         let state = 'normal';
         if (modified.has(entity.id)) state = 'modified';
         else if (impacted.has(entity.id)) state = 'impacted';
+        const cached = cachedPositions?.[entity.id];
         elements.push({
           data: {
             id: entity.id,
@@ -815,7 +898,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
             fullLabel: entity.name,
             kind: entity.kind,
             state
-          }
+          },
+          position: cached || deterministicPosition(entity.id, index, entities.length)
         });
       }
       const edgeBuckets = new Map();
@@ -833,9 +917,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
             label: rel.kind,
             kind: rel.kind,
             cpDist: sign * magnitude,
-            cpWeight: 0.5
+            cpWeight: 0.5,
+            laneKey: pairKey
           }
         });
+      }
+      if (cy) {
+        cy.destroy();
+        cy = null;
       }
       cy = cytoscape({
         container: document.getElementById('graph'),
@@ -921,14 +1010,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
             'opacity': 0.14
           }}
         ],
-        layout: {
+        layout: cachedPositions ? {
+          name: 'preset',
+          fit: true,
+          padding: 80
+        } : {
           name: 'cose',
           animate: true,
           animationDuration: 650,
           refresh: 20,
           fit: true,
           padding: 80,
-          randomize: true,
+          randomize: false,
           nodeRepulsion: 1400000,
           nodeOverlap: 24,
           idealEdgeLength: 170,
@@ -941,6 +1034,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
           minTemp: 1.0
         }
       });
+      cy.on('layoutstop', () => {
+        applyEdgeLanes();
+        saveGraphPositions(activeGraphSignature);
+      });
+      cy.on('free', 'node', () => saveGraphPositions(activeGraphSignature));
       cy.on('mouseover', 'node', event => {
         const node = event.target;
         node.addClass('hover');
@@ -956,7 +1054,106 @@ const INDEX_HTML: &str = r#"<!doctype html>
       });
       cy.on('mouseover', 'edge', event => event.target.addClass('hover'));
       cy.on('mouseout', 'edge', event => event.target.removeClass('hover'));
-      setTimeout(() => cy && cy.fit(undefined, 48), 80);
+      setTimeout(() => {
+        if (!cy) return;
+        applyEdgeLanes();
+        cy.fit(undefined, 48);
+      }, 80);
+    }
+
+    function graphSignature(data) {
+      const nodes = (data.entities || []).map(entity => entity.id).sort().join('|');
+      const edges = (data.relations || [])
+        .map(rel => `${rel.source}->${rel.target}:${rel.kind}`)
+        .sort()
+        .join('|');
+      return String(stableHash(`${scopeEl.value}|${containsEl.checked}|${nodes}|${edges}`));
+    }
+
+    function loadGraphPositions(signature) {
+      try {
+        const raw = localStorage.getItem(`cog-graph-positions:${signature}`);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function saveGraphPositions(signature) {
+      if (!cy || !signature) return;
+      const positions = {};
+      cy.nodes().forEach(node => {
+        const position = node.position();
+        positions[node.id()] = {
+          x: Math.round(position.x * 100) / 100,
+          y: Math.round(position.y * 100) / 100
+        };
+      });
+      try {
+        localStorage.setItem(`cog-graph-positions:${signature}`, JSON.stringify(positions));
+      } catch {
+        // Browser storage is best-effort; graph rendering must continue without it.
+      }
+    }
+
+    function deterministicPosition(id, index, total) {
+      const count = Math.max(1, total);
+      const hash = stableHash(id);
+      const angle = ((index / count) * Math.PI * 2) + ((hash % 628) / 100);
+      const ring = 260 + (hash % 7) * 42 + Math.floor(index / Math.max(1, Math.ceil(Math.sqrt(count)))) * 14;
+      return {
+        x: Math.cos(angle) * ring,
+        y: Math.sin(angle) * ring
+      };
+    }
+
+    function stableHash(value) {
+      let hash = 2166136261;
+      const text = String(value || '');
+      for (let index = 0; index < text.length; index += 1) {
+        hash ^= text.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return hash >>> 0;
+    }
+
+    function applyEdgeLanes() {
+      if (!cy) return;
+      let sumX = 0;
+      let sumY = 0;
+      cy.nodes().forEach(node => {
+        sumX += node.position('x');
+        sumY += node.position('y');
+      });
+      const center = {
+        x: sumX / Math.max(1, cy.nodes().length),
+        y: sumY / Math.max(1, cy.nodes().length)
+      };
+      const buckets = new Map();
+      cy.edges().forEach(edge => {
+        const source = edge.source().id();
+        const target = edge.target().id();
+        const key = [source, target].sort().join('|');
+        const bucket = buckets.get(key) || [];
+        bucket.push(edge);
+        buckets.set(key, bucket);
+      });
+      buckets.forEach(bucket => {
+        bucket.sort((left, right) => left.id().localeCompare(right.id()));
+        bucket.forEach((edge, index) => {
+          const source = edge.source().position();
+          const target = edge.target().position();
+          const mid = { x: (source.x + target.x) / 2, y: (source.y + target.y) / 2 };
+          const outward = ((mid.x - center.x) * (target.y - source.y) - (mid.y - center.y) * (target.x - source.x)) >= 0 ? 1 : -1;
+          const pairOffset = index - (bucket.length - 1) / 2;
+          const relationOffset = (stableHash(edge.data('kind') || edge.id()) % 7) - 3;
+          const distance = outward * (34 + Math.abs(pairOffset) * 22 + Math.abs(relationOffset) * 4);
+          edge.data('cpDist', Math.round(distance + pairOffset * 18 + relationOffset * 3));
+          edge.data('cpWeight', 0.42 + ((stableHash(edge.id()) % 17) / 100));
+        });
+      });
     }
 
     function renderChain() {
@@ -1028,6 +1225,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     scopeEl.addEventListener('change', loadData);
     containsEl.addEventListener('change', loadData);
     document.getElementById('top-k').addEventListener('input', renderRecommendationRanking);
+    document.getElementById('apply-runtime-config').addEventListener('click', applyRuntimeConfig);
     document.getElementById('reset-weights').addEventListener('click', () => {
       currentWeights = { ...(recommendationSummary?.default_weights || {}) };
       renderWeightControls();
@@ -1055,5 +1253,10 @@ mod tests {
         assert!(INDEX_HTML.contains("Recommendation ranking"));
         assert!(INDEX_HTML.contains("scoreRecommendation"));
         assert!(INDEX_HTML.contains("reset-weights"));
+        assert!(INDEX_HTML.contains("/api/recommendations/runtime-config"));
+        assert!(INDEX_HTML.contains("apply-runtime-config"));
+        assert!(INDEX_HTML.contains("renderRecommendationRanking();"));
+        assert!(INDEX_HTML.contains("loadGraphPositions"));
+        assert!(INDEX_HTML.contains("applyEdgeLanes"));
     }
 }

@@ -625,6 +625,9 @@ pub struct Engine {
     token_estimate_cache: TokenEstimateCache,
     /// Shared pause flag set by the TUI and read before tool execution.
     shared_paused: Arc<StdMutex<bool>>,
+    /// Tool-completion recommendation loop. It records trajectories in the
+    /// engine so recommendations are ready before the next provider request.
+    cog_recommender_runtime: StdMutex<crate::cog_recommender::runtime::RuntimeRecommendationLoop>,
 }
 
 // === Internal tool helpers ===
@@ -973,6 +976,8 @@ impl Engine {
             .map(std::sync::Arc::from);
 
         let active_route_limits = config.active_route_limits;
+        let cog_recommender_runtime =
+            crate::cog_recommender::runtime::RuntimeRecommendationLoop::open(&config.workspace);
         let engine = Engine {
             config,
             api_config: api_config.clone(),
@@ -1008,6 +1013,7 @@ impl Engine {
             current_mode: AppMode::Agent,
             token_estimate_cache: TokenEstimateCache::new(),
             shared_paused: shared_paused.clone(),
+            cog_recommender_runtime: StdMutex::new(cog_recommender_runtime),
         };
         let handle = EngineHandle {
             tx_op,

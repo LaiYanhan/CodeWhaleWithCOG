@@ -465,6 +465,21 @@ impl Engine {
             // model sees compile errors before its next reasoning step.
             self.flush_pending_lsp_diagnostics().await;
 
+            let recommendation_context =
+                self.cog_recommender_runtime
+                    .lock()
+                    .ok()
+                    .and_then(|mut runtime| {
+                        runtime.take_context_for_next_request(&self.session.id, &turn.id)
+                    });
+            if let Some(context) = recommendation_context {
+                self.add_session_message(self.runtime_text_message_with_turn_metadata(
+                    context,
+                    UserInputProvenance::Runtime,
+                ))
+                .await;
+            }
+
             // #159: layered context seam checkpoint. This is opt-in for
             // v0.7.5 while #200 audits cache-hit behavior; when enabled it
             // appends <archived_context> blocks rather than replacing history.
@@ -2507,6 +2522,22 @@ impl Engine {
                             None => output_for_context,
                         };
 
+                        if let Ok(mut runtime) = self.cog_recommender_runtime.lock() {
+                            runtime.record_tool_completed(
+                                &outcome.id,
+                                &self.session.id,
+                                &turn.id,
+                                &outcome.name,
+                                tool_input.clone(),
+                                output_for_context.clone(),
+                                if output.success {
+                                    crate::cog_recommender::types::ToolEventStatus::Success
+                                } else {
+                                    crate::cog_recommender::types::ToolEventStatus::Error
+                                },
+                            );
+                        }
+
                         self.add_session_message(Message {
                             role: "user".to_string(),
                             content: vec![ContentBlock::ToolResult {
@@ -2540,6 +2571,17 @@ impl Engine {
                             Some(&error),
                             &self.session.workspace,
                         );
+                        if let Ok(mut runtime) = self.cog_recommender_runtime.lock() {
+                            runtime.record_tool_completed(
+                                &outcome.id,
+                                &self.session.id,
+                                &turn.id,
+                                &outcome.name,
+                                tool_input.clone(),
+                                error.clone(),
+                                crate::cog_recommender::types::ToolEventStatus::Error,
+                            );
+                        }
                         self.add_session_message(Message {
                             role: "user".to_string(),
                             content: vec![ContentBlock::ToolResult {

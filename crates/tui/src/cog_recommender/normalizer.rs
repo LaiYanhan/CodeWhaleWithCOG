@@ -11,19 +11,21 @@ pub fn normalize_tool_event(raw: &RawToolEvent) -> Vec<TrajectoryEvent> {
 
     let mut events = Vec::new();
     let kind = classify_event(raw);
-    events.push(TrajectoryEvent {
-        id: format!("{}:{}", raw.id, kind_suffix(kind)),
-        raw_event_id: raw.id.clone(),
-        session_id: raw.session_id.clone(),
-        kind,
-        entity_ref: None,
-        file_path: extract_path(&raw.input_summary),
-        line_range: None,
-        payload: raw.input_summary.clone(),
-        confidence: 0.0,
-    });
+    if let Some(kind) = kind {
+        events.push(TrajectoryEvent {
+            id: format!("{}:{}", raw.id, kind_suffix(kind)),
+            raw_event_id: raw.id.clone(),
+            session_id: raw.session_id.clone(),
+            kind,
+            entity_ref: None,
+            file_path: extract_path(&raw.input_summary),
+            line_range: None,
+            payload: raw.input_summary.clone(),
+            confidence: 0.0,
+        });
+    }
 
-    if raw.status == ToolEventStatus::Error && kind != TrajectoryKind::ErrorSignal {
+    if raw.status == ToolEventStatus::Error && kind != Some(TrajectoryKind::ErrorSignal) {
         events.push(TrajectoryEvent {
             id: format!("{}:error", raw.id),
             raw_event_id: raw.id.clone(),
@@ -44,37 +46,37 @@ fn is_behavior_origin(origin: ToolEventOrigin) -> bool {
     matches!(origin, ToolEventOrigin::Agent | ToolEventOrigin::User)
 }
 
-fn classify_event(raw: &RawToolEvent) -> TrajectoryKind {
+fn classify_event(raw: &RawToolEvent) -> Option<TrajectoryKind> {
     let name = raw.tool_name.as_str();
     if is_cog_command(raw) {
-        return if is_cog_write(raw) {
+        return Some(if is_cog_write(raw) {
             TrajectoryKind::CogWrite
         } else {
             TrajectoryKind::CogQuery
-        };
+        });
     }
     if matches!(name, "read_file" | "handle_read") {
-        return TrajectoryKind::ReadEntity;
+        return Some(TrajectoryKind::ReadEntity);
     }
     if matches!(name, "file_search" | "grep_files" | "project_map") || name.contains("search") {
-        return TrajectoryKind::SearchEntity;
+        return Some(TrajectoryKind::SearchEntity);
     }
     if matches!(
         name,
         "apply_patch" | "edit_file" | "write_file" | "fim_edit"
     ) {
-        return TrajectoryKind::EditEntity;
+        return Some(TrajectoryKind::EditEntity);
     }
     if name.contains("shell") || name == "exec" {
         let command = command_text(&raw.input_summary);
         if looks_like_test_command(&command) {
-            return TrajectoryKind::TestEntity;
+            return Some(TrajectoryKind::TestEntity);
         }
     }
     if raw.status == ToolEventStatus::Error {
-        return TrajectoryKind::ErrorSignal;
+        return Some(TrajectoryKind::ErrorSignal);
     }
-    TrajectoryKind::ReadEntity
+    None
 }
 
 fn is_cog_command(raw: &RawToolEvent) -> bool {
@@ -182,5 +184,13 @@ mod tests {
         let events = normalize_tool_event(&event);
 
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn ignores_successful_non_behavior_tools() {
+        for tool in ["checklist_write", "git_diff", "exec_shell"] {
+            let events = normalize_tool_event(&raw(tool, json!({"cmd": "python helper.py"})));
+            assert!(events.is_empty(), "{tool} must not become read_entity");
+        }
     }
 }
