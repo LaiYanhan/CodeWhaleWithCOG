@@ -472,18 +472,33 @@ impl Engine {
                     .and_then(|mut runtime| {
                         runtime.take_context_for_next_request(&self.session.id, &turn.id)
                     });
+            let mut recommendation_audit = None;
             if let Some(context) = recommendation_context {
+                let before_excerpt = self.recommendation_injection_before_excerpt();
                 self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                    context,
+                    context.text.clone(),
                     UserInputProvenance::Runtime,
                 ))
                 .await;
+                recommendation_audit = Some((context.injection_id, context.text, before_excerpt));
             }
 
             // #159: layered context seam checkpoint. This is opt-in for
             // v0.7.5 while #200 audits cache-hit behavior; when enabled it
             // appends <archived_context> blocks rather than replacing history.
             self.layered_context_checkpoint().await;
+            if let Some((injection_id, inserted_text, before_excerpt)) = recommendation_audit {
+                let after_excerpt = self.recommendation_injection_after_excerpt(&inserted_text);
+                let request_context_excerpt = render_recommendation_injection_audit_excerpt(
+                    &before_excerpt,
+                    &inserted_text,
+                    &after_excerpt,
+                );
+                if let Ok(runtime) = self.cog_recommender_runtime.lock() {
+                    runtime
+                        .record_injection_context_excerpt(&injection_id, &request_context_excerpt);
+                }
+            }
 
             // Build the request
             let force_update_plan_this_step = force_update_plan_first && !turn.has_tool_calls();
@@ -2733,6 +2748,87 @@ impl Engine {
     pub(super) fn messages_with_turn_metadata(&self) -> Vec<Message> {
         self.session.messages.clone().into()
     }
+
+    fn recommendation_injection_before_excerpt(&self) -> String {
+        let mut excerpts = self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .filter_map(message_audit_excerpt)
+            .take(2)
+            .collect::<Vec<_>>();
+        excerpts.reverse();
+        excerpts.join("\n\n")
+    }
+
+    fn recommendation_injection_after_excerpt(&self, inserted_text: &str) -> String {
+        let Some(injection_index) = self.session.messages.iter().rposition(|message| {
+            message.content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => text == inserted_text,
+                _ => false,
+            })
+        }) else {
+            return String::new();
+        };
+        self.session
+            .messages
+            .iter()
+            .skip(injection_index + 1)
+            .filter_map(message_audit_excerpt)
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+fn message_audit_excerpt(message: &Message) -> Option<String> {
+    let body = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. }
+                if !is_turn_metadata_text(text)
+                    && !text.trim_start().starts_with("<repository_recommendations") =>
+            {
+                Some(text.trim())
+            }
+            ContentBlock::ToolResult { content, .. } => Some(content.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if body.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[{}]\n{}",
+        message.role,
+        truncate_audit_excerpt(&body, 600)
+    ))
+}
+
+fn truncate_audit_excerpt(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        truncated.push_str("\n...");
+    }
+    truncated
+}
+
+fn render_recommendation_injection_audit_excerpt(
+    before_excerpt: &str,
+    inserted_text: &str,
+    after_excerpt: &str,
+) -> String {
+    format!(
+        "<context_before>\n{}\n</context_before>\n<inserted_recommendation_context>\n{}\n</inserted_recommendation_context>\n<context_after>\n{}\n</context_after>",
+        before_excerpt.trim(),
+        inserted_text.trim(),
+        after_excerpt.trim()
+    )
 }
 
 pub(super) fn subagent_completion_runtime_text(payload: &str) -> String {

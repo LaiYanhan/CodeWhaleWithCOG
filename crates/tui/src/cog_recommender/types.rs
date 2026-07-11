@@ -115,6 +115,8 @@ pub struct TrajectoryEvent {
 pub enum EvidenceSource {
     CogImpact,
     CogRelation,
+    EntityAdded,
+    EntityDeleted,
     CoAccess,
     ReadBeforeEdit,
     SearchToRead,
@@ -231,7 +233,27 @@ pub struct RecommendationInjection {
     pub turn_id: String,
     pub created_at: DateTime<Utc>,
     pub context_text: String,
+    pub request_context_excerpt: Option<String>,
     pub recommendation_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityChangeKind {
+    Added,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityChange {
+    pub id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub raw_event_id: String,
+    pub ts: DateTime<Utc>,
+    pub kind: EntityChangeKind,
+    pub entity: EntityRef,
+    pub impacted_entities: Vec<EntityRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

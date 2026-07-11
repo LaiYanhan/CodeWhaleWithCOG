@@ -7,7 +7,8 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::storage::DEFAULT_RECOMMENDER_DB_NAME;
+use super::storage::{DEFAULT_RECOMMENDER_DB_NAME, SqliteTrajectoryRepository};
+use super::types::{EntityChange, EntityChangeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +28,8 @@ pub struct VisualizationGraph {
     pub entities: Vec<VisualizationEntity>,
     pub relations: Vec<VisualizationRelation>,
     pub modified_entities: Vec<String>,
+    pub added_entities: Vec<String>,
+    pub deleted_entities: Vec<String>,
     pub impacted_entities: Vec<String>,
     pub tool_chain: Vec<ToolChainNode>,
     pub warnings: Vec<String>,
@@ -128,9 +131,30 @@ impl VisualizationStore {
                 Vec::new()
             }
         };
+        let entity_changes =
+            match self.load_recent_entity_changes(VisualizationScope::Session, limit) {
+                Ok(changes) => changes,
+                Err(err) => {
+                    warnings.push(format!("failed to load entity changes: {err}"));
+                    Vec::new()
+                }
+            };
 
         let latest_turn = raw_events.first().map(|event| event.turn_id.clone());
         let latest_session = raw_events.first().map(|event| event.session_id.clone());
+        let entity_changes = entity_changes
+            .into_iter()
+            .filter(|change| match scope {
+                VisualizationScope::Turn => latest_turn
+                    .as_deref()
+                    .is_none_or(|turn| change.turn_id == turn),
+                VisualizationScope::Session => latest_session
+                    .as_deref()
+                    .is_none_or(|session| change.session_id == session),
+            })
+            .collect::<Vec<_>>();
+        let mut entities = entities;
+        add_deleted_change_entities(&mut entities, &entity_changes);
         let modified_entities = modified_entities_for_scope(
             scope,
             latest_turn.as_deref(),
@@ -138,7 +162,17 @@ impl VisualizationStore {
             &trajectory_events,
             &entities,
         );
-        let impacted_entities = impacted_entities(&modified_entities, &relations);
+        let added_entities = changed_entities(&entity_changes, &entities, EntityChangeKind::Added);
+        let deleted_entities =
+            changed_entities(&entity_changes, &entities, EntityChangeKind::Deleted);
+        let impacted_entities = impacted_entities(
+            &modified_entities,
+            &added_entities,
+            &deleted_entities,
+            &relations,
+            &entity_changes,
+            &entities,
+        );
         let tool_chain = tool_chain_for_scope(
             scope,
             latest_turn.as_deref(),
@@ -151,6 +185,8 @@ impl VisualizationStore {
             entities,
             relations,
             modified_entities,
+            added_entities,
+            deleted_entities,
             impacted_entities,
             tool_chain,
             warnings,
@@ -260,6 +296,19 @@ impl VisualizationStore {
         let rows = stmt.query_map([limit_to_i64(limit)], map_trajectory_record)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    fn load_recent_entity_changes(
+        &self,
+        scope: VisualizationScope,
+        limit: usize,
+    ) -> Result<Vec<EntityChange>> {
+        let path = self.recommender_db_path();
+        if !path.exists() {
+            anyhow::bail!("{} does not exist", path.display());
+        }
+        let repo = SqliteTrajectoryRepository::open(&path)?;
+        repo.list_recent_entity_changes(scope, limit)
+    }
 }
 
 fn map_trajectory_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrajectoryRecord> {
@@ -316,8 +365,62 @@ fn modified_entities_for_scope(
     sorted_ids(modified)
 }
 
-fn impacted_entities(modified: &[String], relations: &[VisualizationRelation]) -> Vec<String> {
-    let modified: HashSet<String> = modified.iter().cloned().collect();
+fn add_deleted_change_entities(entities: &mut Vec<VisualizationEntity>, changes: &[EntityChange]) {
+    let existing = entities
+        .iter()
+        .map(|entity| entity.id.clone())
+        .collect::<HashSet<_>>();
+    let mut added = HashSet::new();
+    for change in changes
+        .iter()
+        .filter(|change| change.kind == EntityChangeKind::Deleted)
+    {
+        let id = deleted_entity_id(&change.entity.qualified_name);
+        if existing.contains(&id) || !added.insert(id.clone()) {
+            continue;
+        }
+        entities.push(VisualizationEntity {
+            id,
+            name: change.entity.qualified_name.clone(),
+            display_name: display_name(&change.entity.qualified_name),
+            kind: "deleted".to_string(),
+            file_path: change.entity.file_path.clone(),
+        });
+    }
+}
+
+fn changed_entities(
+    changes: &[EntityChange],
+    entities: &[VisualizationEntity],
+    kind: EntityChangeKind,
+) -> Vec<String> {
+    let mut ids = HashSet::new();
+    for change in changes.iter().filter(|change| change.kind == kind) {
+        match kind {
+            EntityChangeKind::Added => {
+                if let Some(id) = current_entity_id(&change.entity, entities) {
+                    ids.insert(id);
+                }
+            }
+            EntityChangeKind::Deleted => {
+                ids.insert(deleted_entity_id(&change.entity.qualified_name));
+            }
+        }
+    }
+    sorted_ids(ids)
+}
+
+fn impacted_entities(
+    modified: &[String],
+    added: &[String],
+    deleted: &[String],
+    relations: &[VisualizationRelation],
+    changes: &[EntityChange],
+    entities: &[VisualizationEntity],
+) -> Vec<String> {
+    let mut source_set: HashSet<String> = modified.iter().cloned().collect();
+    source_set.extend(added.iter().cloned());
+    source_set.extend(deleted.iter().cloned());
     let mut reverse_dependencies: HashMap<String, Vec<String>> = HashMap::new();
     for relation in relations {
         if matches!(relation.kind.as_str(), "calls" | "uses") {
@@ -329,7 +432,12 @@ fn impacted_entities(modified: &[String], relations: &[VisualizationRelation]) -
     }
 
     let mut impacted = HashSet::new();
-    let mut queue: VecDeque<String> = modified.iter().cloned().collect();
+    let mut queue: VecDeque<String> = modified
+        .iter()
+        .chain(added.iter())
+        .chain(deleted.iter())
+        .cloned()
+        .collect();
     while let Some(entity_id) = queue.pop_front() {
         if let Some(dependents) = reverse_dependencies.get(&entity_id) {
             for dependent in dependents {
@@ -342,10 +450,36 @@ fn impacted_entities(modified: &[String], relations: &[VisualizationRelation]) -
             break;
         }
     }
-    for id in &modified {
+    for change in changes {
+        for impacted_entity in &change.impacted_entities {
+            if let Some(id) = current_entity_id(impacted_entity, entities) {
+                impacted.insert(id);
+            }
+        }
+    }
+    for id in &source_set {
         impacted.remove(id);
     }
     sorted_ids(impacted)
+}
+
+fn current_entity_id(
+    entity: &super::types::EntityRef,
+    entities: &[VisualizationEntity],
+) -> Option<String> {
+    if let Some(id) = &entity.cog_entity_id
+        && entities.iter().any(|candidate| candidate.id == *id)
+    {
+        return Some(id.clone());
+    }
+    entities
+        .iter()
+        .find(|candidate| candidate.name == entity.qualified_name)
+        .map(|candidate| candidate.id.clone())
+}
+
+fn deleted_entity_id(qualified_name: &str) -> String {
+    format!("deleted:{qualified_name}")
 }
 
 fn tool_chain_for_scope(
@@ -622,7 +756,10 @@ mod tests {
     use super::*;
     use crate::cog_recommender::collector::build_raw_event;
     use crate::cog_recommender::storage::{SqliteTrajectoryRepository, TrajectoryRepository};
-    use crate::cog_recommender::types::{ToolEventStatus, TrajectoryEvent, TrajectoryKind};
+    use crate::cog_recommender::types::{
+        EntityChange, EntityChangeKind, EntityKind, EntityRef, ToolEventStatus, TrajectoryEvent,
+        TrajectoryKind,
+    };
 
     #[test]
     fn graph_defaults_to_calls_and_uses_and_marks_modified_and_impacted() {
@@ -668,6 +805,86 @@ mod tests {
 
         assert_eq!(graph.relations.len(), 1);
         assert_eq!(graph.relations[0].kind, "contains");
+    }
+
+    #[test]
+    fn graph_marks_added_and_deleted_entities_from_sync_diff() {
+        let workspace = tempdir().expect("workspace");
+        create_cog_db(
+            workspace.path(),
+            &[("a", "api", "module"), ("new", "new_feature", "module")],
+            &[("r1", "a", "new", "uses")],
+        );
+        create_recommender_db(workspace.path(), "new_feature.py", "turn-1", "session-1");
+        let repo = SqliteTrajectoryRepository::open(
+            &workspace
+                .path()
+                .join(".cog")
+                .join(super::DEFAULT_RECOMMENDER_DB_NAME),
+        )
+        .expect("repo");
+        repo.record_entity_change(&EntityChange {
+            id: "change-added".into(),
+            session_id: "session-1".into(),
+            turn_id: "turn-1".into(),
+            raw_event_id: "raw".into(),
+            ts: Utc::now(),
+            kind: EntityChangeKind::Added,
+            entity: EntityRef {
+                cog_entity_id: Some("new".into()),
+                qualified_name: "new_feature".into(),
+                kind: EntityKind::Module,
+                file_path: None,
+                confidence: 0.9,
+            },
+            impacted_entities: vec![EntityRef {
+                cog_entity_id: Some("a".into()),
+                qualified_name: "api".into(),
+                kind: EntityKind::Module,
+                file_path: None,
+                confidence: 0.9,
+            }],
+        })
+        .expect("change");
+        repo.record_entity_change(&EntityChange {
+            id: "change-deleted".into(),
+            session_id: "session-1".into(),
+            turn_id: "turn-1".into(),
+            raw_event_id: "raw".into(),
+            ts: Utc::now(),
+            kind: EntityChangeKind::Deleted,
+            entity: EntityRef {
+                cog_entity_id: Some("old".into()),
+                qualified_name: "old_feature".into(),
+                kind: EntityKind::Module,
+                file_path: None,
+                confidence: 0.9,
+            },
+            impacted_entities: vec![EntityRef {
+                cog_entity_id: Some("a".into()),
+                qualified_name: "api".into(),
+                kind: EntityKind::Module,
+                file_path: None,
+                confidence: 0.9,
+            }],
+        })
+        .expect("change");
+
+        let graph = VisualizationStore::new(workspace.path()).load_graph(
+            VisualizationScope::Turn,
+            false,
+            50,
+        );
+
+        assert_eq!(graph.added_entities, vec!["new"]);
+        assert_eq!(graph.deleted_entities, vec!["deleted:old_feature"]);
+        assert!(
+            graph
+                .entities
+                .iter()
+                .any(|entity| entity.id == "deleted:old_feature")
+        );
+        assert!(graph.impacted_entities.contains(&"a".to_string()));
     }
 
     #[test]

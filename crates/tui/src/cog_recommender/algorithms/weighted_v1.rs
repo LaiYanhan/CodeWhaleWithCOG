@@ -107,7 +107,11 @@ fn score_candidate(context: &RecommendationContext, candidate: &Candidate) -> f6
     let cog_graph_score = capped_sum(&candidate.evidence, |source| {
         matches!(
             source,
-            EvidenceSource::CogImpact | EvidenceSource::CogRelation | EvidenceSource::Assertion
+            EvidenceSource::CogImpact
+                | EvidenceSource::CogRelation
+                | EvidenceSource::EntityAdded
+                | EvidenceSource::EntityDeleted
+                | EvidenceSource::Assertion
         )
     });
     let trajectory_score = capped_sum(&candidate.evidence, |source| {
@@ -215,7 +219,12 @@ fn suggested_action(context: &RecommendationContext, evidence: &[Evidence]) -> S
     match (context.trigger.kind, strongest) {
         (
             TrajectoryKind::EditEntity,
-            Some(EvidenceSource::CogImpact | EvidenceSource::CogRelation),
+            Some(
+                EvidenceSource::CogImpact
+                | EvidenceSource::CogRelation
+                | EvidenceSource::EntityAdded
+                | EvidenceSource::EntityDeleted,
+            ),
         ) => SuggestedAction::InspectImpact,
         (TrajectoryKind::EditEntity, Some(EvidenceSource::EditToTest | EvidenceSource::Rule)) => {
             SuggestedAction::RunTest
@@ -268,15 +277,17 @@ fn evidence_priority(source: EvidenceSource) -> u8 {
     match source {
         EvidenceSource::CogImpact => 0,
         EvidenceSource::CogRelation => 1,
-        EvidenceSource::Assertion => 2,
-        EvidenceSource::ErrorToEdit => 3,
-        EvidenceSource::ReadBeforeEdit => 4,
-        EvidenceSource::SearchToEdit => 5,
-        EvidenceSource::SearchToRead => 6,
-        EvidenceSource::EditToTest => 7,
-        EvidenceSource::CogWriteToEdit => 8,
-        EvidenceSource::CoAccess => 9,
-        EvidenceSource::Rule => 10,
+        EvidenceSource::EntityDeleted => 2,
+        EvidenceSource::EntityAdded => 3,
+        EvidenceSource::Assertion => 4,
+        EvidenceSource::ErrorToEdit => 5,
+        EvidenceSource::ReadBeforeEdit => 6,
+        EvidenceSource::SearchToEdit => 7,
+        EvidenceSource::SearchToRead => 8,
+        EvidenceSource::EditToTest => 9,
+        EvidenceSource::CogWriteToEdit => 10,
+        EvidenceSource::CoAccess => 11,
+        EvidenceSource::Rule => 12,
     }
 }
 

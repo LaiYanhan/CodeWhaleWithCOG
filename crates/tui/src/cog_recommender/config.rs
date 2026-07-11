@@ -30,7 +30,7 @@ impl Default for RecommenderConfig {
             max_recommendations: 5,
             min_score: 0.05,
             min_injection_score: 0.20,
-            max_total_chars: 1200,
+            max_total_chars: 2400,
             max_reason_chars: 180,
             max_injections_per_turn: 1,
         }

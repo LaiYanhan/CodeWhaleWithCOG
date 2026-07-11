@@ -715,6 +715,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       letter-spacing: 0;
     }
     .ctx-tag { color: #2997ff; font-weight: 600; }
+    .ctx-context { color: #aab4c5; font-weight: 600; }
+    .ctx-inserted { color: #5ac8fa; font-weight: 700; }
     .ctx-action { color: #fde68a; }
     .ctx-entity { color: #93c5fd; font-weight: 600; }
     .ctx-score { color: #bbf7d0; }
@@ -1160,14 +1162,22 @@ const INDEX_HTML: &str = r#"<!doctype html>
         return;
       }
       const created = selected.created_at ? new Date(selected.created_at).toLocaleString() : 'unknown time';
-      detailMeta.textContent = `Inserted ${created} · session ${selected.session_id || ''} · turn ${selected.turn_id || ''}`;
-      detail.innerHTML = highlightRecommendationContext(selected.context_text || '');
+      const hasAuditWindow = Boolean(selected.request_context_excerpt);
+      detailMeta.textContent = `Inserted ${created} · session ${selected.session_id || ''} · turn ${selected.turn_id || ''}${hasAuditWindow ? ' · request context window captured' : ''}`;
+      detail.innerHTML = highlightRecommendationContext(selected.request_context_excerpt || selected.context_text || '');
     }
 
     function highlightRecommendationContext(value) {
       return escapeHtml(value)
         .split('\n')
         .map(line => {
+          if (line.startsWith('&lt;context_before') || line.startsWith('&lt;/context_before') ||
+              line.startsWith('&lt;context_after') || line.startsWith('&lt;/context_after')) {
+            return `<span class="ctx-context">${line}</span>`;
+          }
+          if (line.startsWith('&lt;inserted_recommendation_context') || line.startsWith('&lt;/inserted_recommendation_context')) {
+            return `<span class="ctx-inserted">${line}</span>`;
+          }
           if (line.startsWith('&lt;repository_recommendations') || line.startsWith('&lt;/repository_recommendations')) {
             return `<span class="ctx-tag">${line}</span>`;
           }
@@ -1208,6 +1218,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     function renderGraph() {
       const modified = new Set(graphData.modified_entities || []);
+      const added = new Set(graphData.added_entities || []);
+      const deleted = new Set(graphData.deleted_entities || []);
       const impacted = new Set(graphData.impacted_entities || []);
       activeGraphSignature = graphSignature(graphData);
       const cachedPositions = loadGraphPositions(activeGraphSignature);
@@ -1217,6 +1229,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         const entity = entities[index];
         let state = 'normal';
         if (modified.has(entity.id)) state = 'modified';
+        else if (deleted.has(entity.id)) state = 'deleted';
+        else if (added.has(entity.id)) state = 'added';
         else if (impacted.has(entity.id)) state = 'impacted';
         const cached = cachedPositions?.[entity.id];
         elements.push({
@@ -1289,6 +1303,30 @@ const INDEX_HTML: &str = r#"<!doctype html>
             'shadow-blur': 28,
             'shadow-color': '#dc2626',
             'shadow-opacity': 0.55,
+            'shadow-offset-x': 0,
+            'shadow-offset-y': 0,
+            'z-index': 7
+          }},
+          { selector: 'node[state = "added"]', style: {
+            'background-color': '#d1fae5',
+            'border-color': '#10b981',
+            'border-width': 4,
+            'shadow-blur': 26,
+            'shadow-color': '#10b981',
+            'shadow-opacity': 0.44,
+            'shadow-offset-x': 0,
+            'shadow-offset-y': 0,
+            'z-index': 7
+          }},
+          { selector: 'node[state = "deleted"]', style: {
+            'background-color': '#f5f5f7',
+            'border-color': '#6e6e73',
+            'border-style': 'dashed',
+            'border-width': 4,
+            'color': '#6e6e73',
+            'shadow-blur': 24,
+            'shadow-color': '#6e6e73',
+            'shadow-opacity': 0.34,
             'shadow-offset-x': 0,
             'shadow-offset-y': 0,
             'z-index': 7

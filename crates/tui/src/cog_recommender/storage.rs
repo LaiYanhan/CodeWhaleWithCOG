@@ -9,9 +9,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use super::config::RecommenderConfig;
 use super::graph::EdgeStats;
 use super::types::{
-    EntityRef, EvidenceSource, LineRange, RawToolEvent, Recommendation, RecommendationFeedback,
-    RecommendationInjection, RecommendationStatus, StoredRecommendation, ToolEventOrigin,
-    ToolEventStatus, TrajectoryEvent, TrajectoryKind,
+    EntityChange, EntityChangeKind, EntityRef, EvidenceSource, LineRange, RawToolEvent,
+    Recommendation, RecommendationFeedback, RecommendationInjection, RecommendationStatus,
+    StoredRecommendation, ToolEventOrigin, ToolEventStatus, TrajectoryEvent, TrajectoryKind,
 };
 
 pub const DEFAULT_RECOMMENDER_DB_NAME: &str = "recommender.db";
@@ -102,7 +102,20 @@ CREATE TABLE IF NOT EXISTS recommendation_injections (
     turn_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     context_text TEXT NOT NULL,
+    request_context_excerpt TEXT,
     recommendation_ids_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS entity_changes (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    raw_event_id TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('added', 'deleted')),
+    entity_name TEXT NOT NULL,
+    entity_json TEXT NOT NULL,
+    impacted_entities_json TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS recommender_runtime_config (
@@ -123,6 +136,10 @@ CREATE INDEX IF NOT EXISTS idx_recommendation_feedback_recommendation
     ON recommendation_feedback(recommendation_id);
 CREATE INDEX IF NOT EXISTS idx_recommendation_injections_session_turn
     ON recommendation_injections(session_id, turn_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_entity_changes_turn
+    ON entity_changes(turn_id, ts);
+CREATE INDEX IF NOT EXISTS idx_entity_changes_session
+    ON entity_changes(session_id, ts);
 "#;
 
 #[derive(Debug, Default)]
@@ -197,6 +214,7 @@ impl SqliteTrajectoryRepository {
             "recommendation_evidence" => "SELECT COUNT(*) FROM recommendation_evidence",
             "recommendation_feedback" => "SELECT COUNT(*) FROM recommendation_feedback",
             "recommendation_injections" => "SELECT COUNT(*) FROM recommendation_injections",
+            "entity_changes" => "SELECT COUNT(*) FROM entity_changes",
             _ => anyhow::bail!("unknown table: {table}"),
         };
         let count: i64 = self.conn.query_row(sql, [], |row| row.get(0))?;
@@ -322,18 +340,98 @@ impl SqliteTrajectoryRepository {
     pub fn record_recommendation_injection(&self, value: &RecommendationInjection) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO recommendation_injections
-             (id, session_id, turn_id, created_at, context_text, recommendation_ids_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (id, session_id, turn_id, created_at, context_text, request_context_excerpt, recommendation_ids_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 value.id,
                 value.session_id,
                 value.turn_id,
                 value.created_at.to_rfc3339(),
                 value.context_text,
+                value.request_context_excerpt,
                 to_json(&value.recommendation_ids)?,
             ],
         )?;
         Ok(())
+    }
+
+    pub fn update_recommendation_injection_context_excerpt(
+        &self,
+        injection_id: &str,
+        request_context_excerpt: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE recommendation_injections
+             SET request_context_excerpt = ?2
+             WHERE id = ?1",
+            params![injection_id, request_context_excerpt],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_entity_change(&self, value: &EntityChange) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO entity_changes
+             (id, session_id, turn_id, raw_event_id, ts, kind, entity_name, entity_json, impacted_entities_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                value.id,
+                value.session_id,
+                value.turn_id,
+                value.raw_event_id,
+                value.ts.to_rfc3339(),
+                to_enum_text(&value.kind)?,
+                value.entity.qualified_name,
+                to_json(&value.entity)?,
+                to_json(&value.impacted_entities)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_recent_entity_changes(
+        &self,
+        scope: super::visualization::VisualizationScope,
+        limit: usize,
+    ) -> Result<Vec<EntityChange>> {
+        match scope {
+            super::visualization::VisualizationScope::Session => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, session_id, turn_id, raw_event_id, ts, kind, entity_json, impacted_entities_json
+                     FROM entity_changes
+                     ORDER BY ts DESC
+                     LIMIT ?1",
+                )?;
+                let rows = stmt.query_map([limit_to_i64(limit)], map_entity_change_row)?;
+                collect_rows(rows)
+            }
+            super::visualization::VisualizationScope::Turn => {
+                let latest_turn: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT turn_id FROM entity_changes
+                         ORDER BY ts DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(latest_turn) = latest_turn else {
+                    return Ok(Vec::new());
+                };
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, session_id, turn_id, raw_event_id, ts, kind, entity_json, impacted_entities_json
+                     FROM entity_changes
+                     WHERE turn_id = ?1
+                     ORDER BY ts DESC
+                     LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(
+                    params![latest_turn, limit_to_i64(limit)],
+                    map_entity_change_row,
+                )?;
+                collect_rows(rows)
+            }
+        }
     }
 
     pub fn list_recent_recommendation_injections(
@@ -344,7 +442,7 @@ impl SqliteTrajectoryRepository {
         match scope {
             super::visualization::VisualizationScope::Session => {
                 let mut stmt = self.conn.prepare(
-                    "SELECT id, session_id, turn_id, created_at, context_text, recommendation_ids_json
+                    "SELECT id, session_id, turn_id, created_at, context_text, request_context_excerpt, recommendation_ids_json
                      FROM recommendation_injections
                      ORDER BY created_at DESC
                      LIMIT ?1",
@@ -367,7 +465,7 @@ impl SqliteTrajectoryRepository {
                     return Ok(Vec::new());
                 };
                 let mut stmt = self.conn.prepare(
-                    "SELECT id, session_id, turn_id, created_at, context_text, recommendation_ids_json
+                    "SELECT id, session_id, turn_id, created_at, context_text, request_context_excerpt, recommendation_ids_json
                      FROM recommendation_injections
                      WHERE turn_id = ?1
                      ORDER BY created_at DESC
@@ -577,6 +675,7 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)
         .context("failed to initialize recommender sqlite schema")?;
     ensure_tool_events_origin_column(conn)?;
+    ensure_recommendation_injections_context_excerpt_column(conn)?;
     Ok(())
 }
 
@@ -595,6 +694,23 @@ fn ensure_tool_events_origin_column(conn: &Connection) -> Result<()> {
         [],
     )
     .context("failed to migrate tool_events.origin")?;
+    Ok(())
+}
+
+fn ensure_recommendation_injections_context_excerpt_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(recommendation_injections)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == "request_context_excerpt" {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        "ALTER TABLE recommendation_injections
+         ADD COLUMN request_context_excerpt TEXT",
+        [],
+    )
+    .context("failed to migrate recommendation_injections.request_context_excerpt")?;
     Ok(())
 }
 
@@ -710,7 +826,7 @@ fn map_recommendation_injection_row(
     row: &Row<'_>,
 ) -> rusqlite::Result<Result<RecommendationInjection>> {
     let created_at: String = row.get(3)?;
-    let recommendation_ids_json: String = row.get(5)?;
+    let recommendation_ids_json: String = row.get(6)?;
     Ok((|| {
         Ok(RecommendationInjection {
             id: row.get(0)?,
@@ -718,7 +834,27 @@ fn map_recommendation_injection_row(
             turn_id: row.get(2)?,
             created_at: parse_ts(&created_at)?,
             context_text: row.get(4)?,
+            request_context_excerpt: row.get(5)?,
             recommendation_ids: from_json(&recommendation_ids_json)?,
+        })
+    })())
+}
+
+fn map_entity_change_row(row: &Row<'_>) -> rusqlite::Result<Result<EntityChange>> {
+    let ts: String = row.get(4)?;
+    let kind: String = row.get(5)?;
+    let entity_json: String = row.get(6)?;
+    let impacted_entities_json: String = row.get(7)?;
+    Ok((|| {
+        Ok(EntityChange {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            turn_id: row.get(2)?,
+            raw_event_id: row.get(3)?,
+            ts: parse_ts(&ts)?,
+            kind: enum_from_text::<EntityChangeKind>(&kind)?,
+            entity: from_json(&entity_json)?,
+            impacted_entities: from_json(&impacted_entities_json)?,
         })
     })())
 }
@@ -872,9 +1008,15 @@ mod tests {
             turn_id: stored.turn_id.clone(),
             created_at: now,
             context_text: "<repository_recommendations>...</repository_recommendations>".into(),
+            request_context_excerpt: None,
             recommendation_ids: vec![stored.id.clone()],
         })
         .expect("injection");
+        repo.update_recommendation_injection_context_excerpt(
+            "injection-1",
+            "<context_before>user task</context_before>\n<inserted_recommendation_context>...</inserted_recommendation_context>",
+        )
+        .expect("injection excerpt");
 
         let mut config = RecommenderConfig::default();
         config.max_recommendations = 3;
@@ -892,6 +1034,13 @@ mod tests {
             .unwrap();
         assert_eq!(injections.len(), 1);
         assert_eq!(injections[0].recommendation_ids, vec!["recommendation-1"]);
+        assert!(
+            injections[0]
+                .request_context_excerpt
+                .as_deref()
+                .unwrap_or_default()
+                .contains("<inserted_recommendation_context>")
+        );
         let context_records = repo
             .list_recent_recommendations_for_context(
                 super::super::visualization::VisualizationScope::Session,

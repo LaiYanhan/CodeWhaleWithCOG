@@ -104,6 +104,8 @@ fn evidence_source_label(source: EvidenceSource) -> &'static str {
     match source {
         EvidenceSource::CogImpact => "cog_impact",
         EvidenceSource::CogRelation => "cog_relation",
+        EvidenceSource::EntityAdded => "entity_added",
+        EvidenceSource::EntityDeleted => "entity_deleted",
         EvidenceSource::CoAccess => "co_access",
         EvidenceSource::ReadBeforeEdit => "read_before_edit",
         EvidenceSource::SearchToRead => "search_to_read",

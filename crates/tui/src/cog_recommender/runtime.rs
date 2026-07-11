@@ -3,6 +3,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
+use rusqlite::Connection;
+use serde_json::json;
 use uuid::Uuid;
 
 use super::cog_adapter::{CliCogAdapter, CogAdapter};
@@ -17,9 +19,10 @@ use super::storage::{
     DEFAULT_RECOMMENDER_DB_NAME, SqliteTrajectoryRepository, TrajectoryRepository,
 };
 use super::types::{
-    Evidence, Recommendation, RecommendationFeedback, RecommendationFeedbackKind,
-    RecommendationInjection, RecommendationStatus, StoredRecommendation, SuggestedAction,
-    ToolEventStatus, TrajectoryEvent, TrajectoryKind,
+    EntityChange, EntityChangeKind, EntityKind, EntityRef, Evidence, EvidenceSource,
+    Recommendation, RecommendationFeedback, RecommendationFeedbackKind, RecommendationInjection,
+    RecommendationStatus, StoredRecommendation, SuggestedAction, ToolEventStatus, TrajectoryEvent,
+    TrajectoryKind,
 };
 
 const FEEDBACK_TOOL_WINDOW: u64 = 10;
@@ -30,6 +33,12 @@ const FEEDBACK_MINUTES: i64 = 15;
 pub struct PendingRecommendationQueue {
     records: Vec<StoredRecommendation>,
     injections_by_turn: HashMap<(String, String), usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRecommendationContext {
+    pub injection_id: String,
+    pub text: String,
 }
 
 impl PendingRecommendationQueue {
@@ -44,7 +53,7 @@ impl PendingRecommendationQueue {
         repository: Option<&SqliteTrajectoryRepository>,
     ) {
         let now = Utc::now();
-        for recommendation in recommendations {
+        for recommendation in dedupe_recommendations(recommendations) {
             let existing = self.records.iter_mut().find(|record| {
                 record.session_id == session_id
                     && record.recommendation.entity.qualified_name
@@ -98,7 +107,7 @@ impl PendingRecommendationQueue {
         tool_index: u64,
         config: &RecommenderConfig,
         repository: Option<&SqliteTrajectoryRepository>,
-    ) -> Option<String> {
+    ) -> Option<RuntimeRecommendationContext> {
         if !config.enabled {
             return None;
         }
@@ -158,14 +167,17 @@ impl PendingRecommendationQueue {
                 None,
             );
         }
-        record_injection(
+        let injection_id = record_injection(
             repository,
             session_id,
             turn_id,
             rendered.text.clone(),
             rendered.recommendation_ids,
         );
-        Some(rendered.text)
+        Some(RuntimeRecommendationContext {
+            injection_id,
+            text: rendered.text,
+        })
     }
 
     pub fn observe(
@@ -317,6 +329,7 @@ impl RuntimeRecommendationLoop {
         output_summary: String,
         status: ToolEventStatus,
     ) {
+        self.reload_config();
         self.tool_index = self.tool_index.saturating_add(1);
         let turn_index = self.turn_index(turn_id);
         self.collector.record_tool_call_started(
@@ -340,9 +353,20 @@ impl RuntimeRecommendationLoop {
             .into_iter()
             .filter(|event| event.raw_event_id == raw.id)
             .collect::<Vec<_>>();
+        let mut summary_fallback_used = false;
         for event in events {
+            let mut change_recommendations = Vec::new();
             if event.kind == TrajectoryKind::EditEntity && status == ToolEventStatus::Success {
+                let before_sync = load_cog_snapshot(&self.workspace);
                 let _ = self.adapter.ensure_synced(&self.workspace);
+                let after_sync = load_cog_snapshot(&self.workspace);
+                change_recommendations = self.record_entity_changes(
+                    session_id,
+                    turn_id,
+                    &raw.id,
+                    before_sync.as_ref(),
+                    after_sync.as_ref(),
+                );
             }
             let resolved = resolve_event_entity(event, &self.adapter);
             for edge in self
@@ -374,8 +398,15 @@ impl RuntimeRecommendationLoop {
                 &self.resolved_graph,
                 self.resolved_recent_events.clone(),
             );
-            if recommendations.is_empty() {
+            recommendations.extend(change_recommendations);
+            recommendations = dedupe_recommendations(recommendations);
+            if recommendations.is_empty() && !summary_fallback_used {
                 recommendations = self.summary_recommendations();
+                recommendations = dedupe_recommendations(recommendations);
+                summary_fallback_used = true;
+            }
+            if recommendations.is_empty() {
+                continue;
             }
             self.queue.enqueue(
                 session_id,
@@ -387,6 +418,96 @@ impl RuntimeRecommendationLoop {
                 self.repository.as_ref(),
             );
         }
+    }
+
+    fn record_entity_changes(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        raw_event_id: &str,
+        before: Option<&CogSnapshot>,
+        after: Option<&CogSnapshot>,
+    ) -> Vec<Recommendation> {
+        let Some(before) = before else {
+            return Vec::new();
+        };
+        let Some(after) = after else {
+            return Vec::new();
+        };
+        let now = Utc::now();
+        let mut recommendations = Vec::new();
+        for (name, entity) in after.entities.iter() {
+            if before.entities.contains_key(name) {
+                continue;
+            }
+            let impacted = after
+                .reverse_dependencies
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            let change = EntityChange {
+                id: Uuid::new_v4().to_string(),
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                raw_event_id: raw_event_id.to_string(),
+                ts: now,
+                kind: EntityChangeKind::Added,
+                entity: entity.clone(),
+                impacted_entities: impacted.clone(),
+            };
+            if let Some(repository) = self.repository.as_ref() {
+                let _ = repository.record_entity_change(&change);
+            }
+            recommendations.push(change_recommendation(
+                entity.clone(),
+                EvidenceSource::EntityAdded,
+                0.78,
+                "new code entity appeared after this edit; inspect integration and callers",
+                name,
+            ));
+            for impacted_entity in impacted {
+                recommendations.push(change_recommendation(
+                    impacted_entity,
+                    EvidenceSource::EntityAdded,
+                    0.68,
+                    "new code entity may affect this dependent entity",
+                    name,
+                ));
+            }
+        }
+        for (name, entity) in before.entities.iter() {
+            if after.entities.contains_key(name) {
+                continue;
+            }
+            let impacted = before
+                .reverse_dependencies
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            let change = EntityChange {
+                id: Uuid::new_v4().to_string(),
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                raw_event_id: raw_event_id.to_string(),
+                ts: now,
+                kind: EntityChangeKind::Deleted,
+                entity: entity.clone(),
+                impacted_entities: impacted.clone(),
+            };
+            if let Some(repository) = self.repository.as_ref() {
+                let _ = repository.record_entity_change(&change);
+            }
+            for impacted_entity in impacted {
+                recommendations.push(change_recommendation(
+                    impacted_entity,
+                    EvidenceSource::EntityDeleted,
+                    0.92,
+                    "deleted code entity had dependents before sync; verify broken references",
+                    name,
+                ));
+            }
+        }
+        recommendations
     }
 
     fn summary_recommendations(&self) -> Vec<Recommendation> {
@@ -422,12 +543,8 @@ impl RuntimeRecommendationLoop {
         &mut self,
         session_id: &str,
         turn_id: &str,
-    ) -> Option<String> {
-        if let Some(repository) = self.repository.as_ref()
-            && let Ok(config) = repository.load_runtime_config()
-        {
-            self.config = config;
-        }
+    ) -> Option<RuntimeRecommendationContext> {
+        self.reload_config();
         let turn_index = self.turn_index(turn_id);
         self.queue.render_for_next_request(
             session_id,
@@ -439,6 +556,19 @@ impl RuntimeRecommendationLoop {
         )
     }
 
+    pub fn record_injection_context_excerpt(
+        &self,
+        injection_id: &str,
+        request_context_excerpt: &str,
+    ) {
+        if let Some(repository) = self.repository.as_ref() {
+            let _ = repository.update_recommendation_injection_context_excerpt(
+                injection_id,
+                request_context_excerpt,
+            );
+        }
+    }
+
     fn turn_index(&mut self, turn_id: &str) -> u64 {
         if let Some(index) = self.turns.get(turn_id) {
             return *index;
@@ -446,6 +576,15 @@ impl RuntimeRecommendationLoop {
         let index = u64::try_from(self.turns.len()).unwrap_or(u64::MAX);
         self.turns.insert(turn_id.to_string(), index);
         index
+    }
+
+    fn reload_config(&mut self) {
+        if let Some(repository) = self.repository.as_ref()
+            && let Ok(config) = repository.load_runtime_config()
+        {
+            self.config = config.clone();
+            self.recommender = Recommender::new(config);
+        }
     }
 
     #[cfg(test)]
@@ -483,6 +622,41 @@ fn merge_evidence(existing: &mut Vec<Evidence>, incoming: Vec<Evidence>) {
     });
 }
 
+fn dedupe_recommendations(recommendations: Vec<Recommendation>) -> Vec<Recommendation> {
+    let mut by_key: HashMap<(String, SuggestedAction), Recommendation> = HashMap::new();
+    for recommendation in recommendations {
+        let key = (
+            recommendation
+                .entity
+                .cog_entity_id
+                .clone()
+                .unwrap_or_else(|| recommendation.entity.qualified_name.clone()),
+            recommendation.suggested_action,
+        );
+        match by_key.get_mut(&key) {
+            Some(existing) => {
+                existing.score = existing.score.max(recommendation.score);
+                if recommendation.display_text.len() > existing.display_text.len() {
+                    existing.display_text = recommendation.display_text.clone();
+                }
+                merge_evidence(&mut existing.evidence, recommendation.evidence);
+            }
+            None => {
+                by_key.insert(key, recommendation);
+            }
+        }
+    }
+    let mut recommendations = by_key.into_values().collect::<Vec<_>>();
+    recommendations.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.entity.qualified_name.cmp(&right.entity.qualified_name))
+    });
+    recommendations
+}
+
 fn persist(repository: Option<&SqliteTrajectoryRepository>, recommendation: &StoredRecommendation) {
     if let Some(repository) = repository {
         let _ = repository.upsert_recommendation(recommendation);
@@ -516,16 +690,119 @@ fn record_injection(
     turn_id: &str,
     context_text: String,
     recommendation_ids: Vec<String>,
-) {
+) -> String {
+    let id = Uuid::new_v4().to_string();
     if let Some(repository) = repository {
         let _ = repository.record_recommendation_injection(&RecommendationInjection {
-            id: Uuid::new_v4().to_string(),
+            id: id.clone(),
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
             created_at: Utc::now(),
             context_text,
+            request_context_excerpt: None,
             recommendation_ids,
         });
+    }
+    id
+}
+
+#[derive(Debug, Clone, Default)]
+struct CogSnapshot {
+    entities: HashMap<String, EntityRef>,
+    reverse_dependencies: HashMap<String, Vec<EntityRef>>,
+}
+
+fn load_cog_snapshot(workspace: &Path) -> Option<CogSnapshot> {
+    let path = workspace.join(".cog").join("cog.db");
+    let conn = Connection::open(path).ok()?;
+    let mut entity_stmt = conn
+        .prepare("SELECT id, qualified_name, kind FROM entities ORDER BY qualified_name")
+        .ok()?;
+    let rows = entity_stmt
+        .query_map([], |row| {
+            let kind_text: String = row.get(2)?;
+            let qualified_name: String = row.get(1)?;
+            Ok(EntityRef {
+                cog_entity_id: Some(row.get(0)?),
+                qualified_name,
+                kind: entity_kind_from_cog(&kind_text),
+                file_path: None,
+                confidence: 0.85,
+            })
+        })
+        .ok()?;
+    let entities = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .ok()?
+        .into_iter()
+        .map(|entity| (entity.qualified_name.clone(), entity))
+        .collect::<HashMap<_, _>>();
+    let mut reverse_dependencies: HashMap<String, Vec<EntityRef>> = HashMap::new();
+    let mut relation_stmt = conn
+        .prepare(
+            "SELECT source.qualified_name, target.qualified_name
+             FROM entity_relations rel
+             JOIN entities source ON source.id = rel.from_entity
+             JOIN entities target ON target.id = rel.to_entity
+             WHERE rel.kind IN ('calls', 'uses')",
+        )
+        .ok()?;
+    let relation_rows = relation_stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .ok()?;
+    for row in relation_rows {
+        let Ok((source, target)) = row else {
+            continue;
+        };
+        if let Some(source_entity) = entities.get(&source) {
+            reverse_dependencies
+                .entry(target)
+                .or_default()
+                .push(source_entity.clone());
+        }
+    }
+    Some(CogSnapshot {
+        entities,
+        reverse_dependencies,
+    })
+}
+
+fn change_recommendation(
+    target: EntityRef,
+    source: EvidenceSource,
+    score: f64,
+    reason: &str,
+    changed_entity: &str,
+) -> Recommendation {
+    let evidence = Evidence {
+        source,
+        target: target.clone(),
+        weight: score,
+        reason: reason.to_string(),
+        payload: json!({ "changed_entity": changed_entity }),
+    };
+    Recommendation {
+        entity: target.clone(),
+        score,
+        evidence: vec![evidence],
+        suggested_action: SuggestedAction::UpdateRelatedCode,
+        display_text: format!(
+            "Verify {} after structural graph change",
+            target.qualified_name
+        ),
+    }
+}
+
+fn entity_kind_from_cog(value: &str) -> EntityKind {
+    match value.to_ascii_lowercase().as_str() {
+        "module" => EntityKind::Module,
+        "function" => EntityKind::Function,
+        "type" | "class" | "interface" | "struct" | "enum" => EntityKind::Type,
+        "method" => EntityKind::Method,
+        "file" => EntityKind::File,
+        _ => EntityKind::Unknown,
     }
 }
 
@@ -586,7 +863,8 @@ mod tests {
         let config = RecommenderConfig::default();
         let text = queue
             .render_for_next_request("s", "t", 0, 2, &config, None)
-            .expect("context");
+            .expect("context")
+            .text;
         assert!(text.contains("a::b"));
         assert!(text.contains("<repository_recommendations"));
         assert!(text.contains("role=\"host_context\""));
@@ -686,9 +964,9 @@ mod tests {
                 None,
             )
             .expect("injected context");
-        assert!(context.contains(&api.qualified_name));
-        assert!(context.contains("evidence: cog_impact"));
-        assert!(context.contains("Prefer reading or verifying"));
+        assert!(context.text.contains(&api.qualified_name));
+        assert!(context.text.contains("evidence: cog_impact"));
+        assert!(context.text.contains("Prefer reading or verifying"));
 
         let read_raw = crate::cog_recommender::collector::build_raw_event(
             "session",
@@ -739,7 +1017,8 @@ mod tests {
 
         let text = queue
             .render_for_next_request("s", "t", 0, 2, &config, None)
-            .expect("context");
+            .expect("context")
+            .text;
 
         assert!(text.contains("short::target"));
         assert!(!text.contains("very::long::target"));
@@ -772,7 +1051,9 @@ mod tests {
             .expect("injections");
 
         assert_eq!(injections.len(), 1);
-        assert_eq!(injections[0].context_text, text);
+        assert_eq!(injections[0].id, text.injection_id);
+        assert_eq!(injections[0].context_text, text.text);
+        assert!(injections[0].request_context_excerpt.is_none());
         assert_eq!(injections[0].recommendation_ids.len(), 1);
     }
 

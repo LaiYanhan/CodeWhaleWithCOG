@@ -437,7 +437,11 @@ fn score_parts(
         cog_graph: capped_sum(evidence, |source| {
             matches!(
                 source,
-                EvidenceSource::CogImpact | EvidenceSource::CogRelation | EvidenceSource::Assertion
+                EvidenceSource::CogImpact
+                    | EvidenceSource::CogRelation
+                    | EvidenceSource::EntityAdded
+                    | EvidenceSource::EntityDeleted
+                    | EvidenceSource::Assertion
             )
         }),
         trajectory: capped_sum(evidence, |source| {
@@ -457,7 +461,10 @@ fn score_parts(
             )
         }),
         risk: capped_sum(evidence, |source| {
-            matches!(source, EvidenceSource::Rule | EvidenceSource::Assertion)
+            matches!(
+                source,
+                EvidenceSource::Rule | EvidenceSource::Assertion | EvidenceSource::EntityDeleted
+            )
         }),
         confidence_bonus: if entity.confidence >= 0.7 { 1.0 } else { 0.0 },
         low_confidence_penalty: if entity.confidence < 0.4 { 1.0 } else { 0.0 },
@@ -506,7 +513,10 @@ fn suggested_action(evidence: &[RecommendationEvidenceSummary]) -> SuggestedActi
     if evidence.iter().any(|item| {
         matches!(
             item.source,
-            EvidenceSource::CogImpact | EvidenceSource::CogRelation
+            EvidenceSource::CogImpact
+                | EvidenceSource::CogRelation
+                | EvidenceSource::EntityAdded
+                | EvidenceSource::EntityDeleted
         )
     }) {
         return SuggestedAction::InspectImpact;
