@@ -10,7 +10,8 @@ use super::config::RecommenderConfig;
 use super::graph::EdgeStats;
 use super::types::{
     EntityRef, EvidenceSource, LineRange, RawToolEvent, Recommendation, RecommendationFeedback,
-    StoredRecommendation, ToolEventOrigin, ToolEventStatus, TrajectoryEvent, TrajectoryKind,
+    RecommendationInjection, RecommendationStatus, StoredRecommendation, ToolEventOrigin,
+    ToolEventStatus, TrajectoryEvent, TrajectoryKind,
 };
 
 pub const DEFAULT_RECOMMENDER_DB_NAME: &str = "recommender.db";
@@ -95,6 +96,15 @@ CREATE TABLE IF NOT EXISTS recommendation_feedback (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS recommendation_injections (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    context_text TEXT NOT NULL,
+    recommendation_ids_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS recommender_runtime_config (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     config_json TEXT NOT NULL,
@@ -111,6 +121,8 @@ CREATE INDEX IF NOT EXISTS idx_recommendations_session_status
     ON recommendations(session_id, status);
 CREATE INDEX IF NOT EXISTS idx_recommendation_feedback_recommendation
     ON recommendation_feedback(recommendation_id);
+CREATE INDEX IF NOT EXISTS idx_recommendation_injections_session_turn
+    ON recommendation_injections(session_id, turn_id, created_at);
 "#;
 
 #[derive(Debug, Default)]
@@ -184,6 +196,7 @@ impl SqliteTrajectoryRepository {
             "recommendations" => "SELECT COUNT(*) FROM recommendations",
             "recommendation_evidence" => "SELECT COUNT(*) FROM recommendation_evidence",
             "recommendation_feedback" => "SELECT COUNT(*) FROM recommendation_feedback",
+            "recommendation_injections" => "SELECT COUNT(*) FROM recommendation_injections",
             _ => anyhow::bail!("unknown table: {table}"),
         };
         let count: i64 = self.conn.query_row(sql, [], |row| row.get(0))?;
@@ -304,6 +317,120 @@ impl SqliteTrajectoryRepository {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn record_recommendation_injection(&self, value: &RecommendationInjection) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO recommendation_injections
+             (id, session_id, turn_id, created_at, context_text, recommendation_ids_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                value.id,
+                value.session_id,
+                value.turn_id,
+                value.created_at.to_rfc3339(),
+                value.context_text,
+                to_json(&value.recommendation_ids)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_recent_recommendation_injections(
+        &self,
+        scope: super::visualization::VisualizationScope,
+        limit: usize,
+    ) -> Result<Vec<RecommendationInjection>> {
+        match scope {
+            super::visualization::VisualizationScope::Session => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, session_id, turn_id, created_at, context_text, recommendation_ids_json
+                     FROM recommendation_injections
+                     ORDER BY created_at DESC
+                     LIMIT ?1",
+                )?;
+                let rows =
+                    stmt.query_map([limit_to_i64(limit)], map_recommendation_injection_row)?;
+                collect_rows(rows)
+            }
+            super::visualization::VisualizationScope::Turn => {
+                let latest_turn: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT turn_id FROM recommendation_injections
+                         ORDER BY created_at DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(latest_turn) = latest_turn else {
+                    return Ok(Vec::new());
+                };
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, session_id, turn_id, created_at, context_text, recommendation_ids_json
+                     FROM recommendation_injections
+                     WHERE turn_id = ?1
+                     ORDER BY created_at DESC
+                     LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(
+                    params![latest_turn, limit_to_i64(limit)],
+                    map_recommendation_injection_row,
+                )?;
+                collect_rows(rows)
+            }
+        }
+    }
+
+    pub fn list_recent_recommendations_for_context(
+        &self,
+        scope: super::visualization::VisualizationScope,
+        limit: usize,
+    ) -> Result<Vec<StoredRecommendation>> {
+        match scope {
+            super::visualization::VisualizationScope::Session => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, session_id, turn_id, trigger_event_ids_json, recommendation_json,
+                            status, created_at, last_triggered_at, exposed_at, expires_at,
+                            trigger_tool_index, exposed_turn_index
+                     FROM recommendations
+                     WHERE status IN ('pending', 'exposed')
+                     ORDER BY last_triggered_at DESC
+                     LIMIT ?1",
+                )?;
+                let rows = stmt.query_map([limit_to_i64(limit)], map_stored_recommendation_row)?;
+                collect_rows(rows)
+            }
+            super::visualization::VisualizationScope::Turn => {
+                let latest_turn: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT turn_id FROM recommendations
+                         WHERE status IN ('pending', 'exposed')
+                         ORDER BY last_triggered_at DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(latest_turn) = latest_turn else {
+                    return Ok(Vec::new());
+                };
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, session_id, turn_id, trigger_event_ids_json, recommendation_json,
+                            status, created_at, last_triggered_at, exposed_at, expires_at,
+                            trigger_tool_index, exposed_turn_index
+                     FROM recommendations
+                     WHERE turn_id = ?1 AND status IN ('pending', 'exposed')
+                     ORDER BY last_triggered_at DESC
+                     LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(
+                    params![latest_turn, limit_to_i64(limit)],
+                    map_stored_recommendation_row,
+                )?;
+                collect_rows(rows)
+            }
+        }
     }
 
     pub fn load_runtime_config(&self) -> Result<RecommenderConfig> {
@@ -579,6 +706,51 @@ fn map_edge_row(row: &Row<'_>) -> rusqlite::Result<Result<EdgeStats>> {
     })())
 }
 
+fn map_recommendation_injection_row(
+    row: &Row<'_>,
+) -> rusqlite::Result<Result<RecommendationInjection>> {
+    let created_at: String = row.get(3)?;
+    let recommendation_ids_json: String = row.get(5)?;
+    Ok((|| {
+        Ok(RecommendationInjection {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            turn_id: row.get(2)?,
+            created_at: parse_ts(&created_at)?,
+            context_text: row.get(4)?,
+            recommendation_ids: from_json(&recommendation_ids_json)?,
+        })
+    })())
+}
+
+fn map_stored_recommendation_row(row: &Row<'_>) -> rusqlite::Result<Result<StoredRecommendation>> {
+    let trigger_event_ids_json: String = row.get(3)?;
+    let recommendation_json: String = row.get(4)?;
+    let status: String = row.get(5)?;
+    let created_at: String = row.get(6)?;
+    let last_triggered_at: String = row.get(7)?;
+    let exposed_at: Option<String> = row.get(8)?;
+    let expires_at: String = row.get(9)?;
+    let trigger_tool_index: i64 = row.get(10)?;
+    let exposed_turn_index: Option<i64> = row.get(11)?;
+    Ok((|| {
+        Ok(StoredRecommendation {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            turn_id: row.get(2)?,
+            trigger_event_ids: from_json(&trigger_event_ids_json)?,
+            recommendation: from_json(&recommendation_json)?,
+            status: enum_from_text::<RecommendationStatus>(&status)?,
+            created_at: parse_ts(&created_at)?,
+            last_triggered_at: parse_ts(&last_triggered_at)?,
+            exposed_at: exposed_at.map(|value| parse_ts(&value)).transpose()?,
+            expires_at: parse_ts(&expires_at)?,
+            trigger_tool_index: u64::try_from(trigger_tool_index).unwrap_or(0),
+            exposed_turn_index: exposed_turn_index.map(|index| u64::try_from(index).unwrap_or(0)),
+        })
+    })())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -654,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_repository_persists_recommendations_feedback_and_config() {
+    fn sqlite_repository_persists_recommendations_feedback_config_and_injection() {
         let repo = SqliteTrajectoryRepository::open_in_memory().expect("repo");
         let now = Utc::now();
         let entity = EntityRef::new("inventory::api::get_stock");
@@ -694,6 +866,15 @@ mod tests {
             created_at: now,
         })
         .expect("feedback");
+        repo.record_recommendation_injection(&RecommendationInjection {
+            id: "injection-1".into(),
+            session_id: stored.session_id.clone(),
+            turn_id: stored.turn_id.clone(),
+            created_at: now,
+            context_text: "<repository_recommendations>...</repository_recommendations>".into(),
+            recommendation_ids: vec![stored.id.clone()],
+        })
+        .expect("injection");
 
         let mut config = RecommenderConfig::default();
         config.max_recommendations = 3;
@@ -702,6 +883,23 @@ mod tests {
         assert_eq!(repo.count_rows("recommendations").unwrap(), 1);
         assert_eq!(repo.count_rows("recommendation_evidence").unwrap(), 1);
         assert_eq!(repo.count_rows("recommendation_feedback").unwrap(), 1);
+        assert_eq!(repo.count_rows("recommendation_injections").unwrap(), 1);
+        let injections = repo
+            .list_recent_recommendation_injections(
+                super::super::visualization::VisualizationScope::Session,
+                10,
+            )
+            .unwrap();
+        assert_eq!(injections.len(), 1);
+        assert_eq!(injections[0].recommendation_ids, vec!["recommendation-1"]);
+        let context_records = repo
+            .list_recent_recommendations_for_context(
+                super::super::visualization::VisualizationScope::Session,
+                10,
+            )
+            .unwrap();
+        assert_eq!(context_records.len(), 1);
+        assert_eq!(context_records[0].id, "recommendation-1");
         assert_eq!(repo.load_runtime_config().unwrap().max_recommendations, 3);
     }
 }

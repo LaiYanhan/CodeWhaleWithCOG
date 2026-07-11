@@ -8,12 +8,15 @@ use axum::http::header;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
 use super::config::RecommenderConfig;
+use super::feedback::render_repository_recommendations;
 use super::recommendation_summary::{RecommendationSummary, RecommendationSummaryStore};
 use super::storage::{DEFAULT_RECOMMENDER_DB_NAME, SqliteTrajectoryRepository};
+use super::types::RecommendationInjection;
 use super::visualization::{VisualizationScope, VisualizationStore};
 
 const DEFAULT_LIMIT: usize = 200;
@@ -41,6 +44,24 @@ struct RecommendationSummaryQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct RecommendationInjectionResponse {
+    scope: VisualizationScope,
+    generated_at: DateTime<Utc>,
+    injections: Vec<RecommendationInjection>,
+    preview: Option<RecommendationInjectionPreview>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RecommendationInjectionPreview {
+    generated_at: DateTime<Utc>,
+    source: &'static str,
+    note: String,
+    context_text: String,
+    recommendation_ids: Vec<String>,
+}
+
 pub fn visualization_router(workspace: impl Into<PathBuf>) -> Router {
     let workspace = workspace.into();
     let state = VisualizationState {
@@ -52,6 +73,10 @@ pub fn visualization_router(workspace: impl Into<PathBuf>) -> Router {
         .route("/", get(index))
         .route("/api/visualization/session-graph", get(session_graph))
         .route("/api/recommendations/summary", get(recommendation_summary))
+        .route(
+            "/api/recommendations/injections",
+            get(recommendation_injections),
+        )
         .route(
             "/api/recommendations/runtime-config",
             get(recommendation_runtime_config).put(update_recommendation_runtime_config),
@@ -123,6 +148,106 @@ async fn recommendation_runtime_config(
     State(state): State<Arc<VisualizationState>>,
 ) -> Json<RecommenderConfig> {
     Json(load_runtime_config(&state.workspace))
+}
+
+async fn recommendation_injections(
+    State(state): State<Arc<VisualizationState>>,
+    Query(query): Query<RecommendationSummaryQuery>,
+) -> Json<RecommendationInjectionResponse> {
+    let path = state
+        .workspace
+        .join(".cog")
+        .join(DEFAULT_RECOMMENDER_DB_NAME);
+    let mut warnings = Vec::new();
+    let mut preview = None;
+    let injections = match SqliteTrajectoryRepository::open(&path) {
+        Ok(repository) => {
+            let injections = repository
+                .list_recent_recommendation_injections(query.scope, query.limit.unwrap_or(20))
+                .unwrap_or_else(|err| {
+                    warnings.push(format!("failed to load recommendation injections: {err}"));
+                    Vec::new()
+                });
+            if injections.is_empty() {
+                preview =
+                    build_recommendation_context_preview(&repository, query.scope, &mut warnings);
+            }
+            injections
+        }
+        Err(err) => {
+            warnings.push(format!(
+                "failed to open recommender db for injection snapshots: {err}"
+            ));
+            Vec::new()
+        }
+    };
+    Json(RecommendationInjectionResponse {
+        scope: query.scope,
+        generated_at: Utc::now(),
+        injections,
+        preview,
+        warnings,
+    })
+}
+
+fn build_recommendation_context_preview(
+    repository: &SqliteTrajectoryRepository,
+    scope: VisualizationScope,
+    warnings: &mut Vec<String>,
+) -> Option<RecommendationInjectionPreview> {
+    let config = repository.load_runtime_config().unwrap_or_else(|err| {
+        warnings.push(format!(
+            "failed to load recommendation runtime config for preview: {err}"
+        ));
+        RecommenderConfig::default()
+    });
+    if !config.enabled {
+        warnings.push("recommendation runtime injection is disabled".to_string());
+        return None;
+    }
+    let limit = config.max_recommendations.max(1).saturating_mul(3);
+    let mut records = repository
+        .list_recent_recommendations_for_context(scope, limit)
+        .unwrap_or_else(|err| {
+            warnings.push(format!(
+                "failed to load pending recommendations for injection preview: {err}"
+            ));
+            Vec::new()
+        });
+    records.retain(|record| record.recommendation.score >= config.min_injection_score);
+    records.sort_by(|left, right| {
+        right
+            .recommendation
+            .score
+            .partial_cmp(&left.recommendation.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    records.truncate(config.max_recommendations);
+    if records.is_empty() {
+        warnings.push(
+            "no runtime pending recommendations found; recommendations table has no pending/exposed records that pass the current runtime config"
+                .to_string(),
+        );
+        return None;
+    }
+    let rendered = render_repository_recommendations(records.iter(), &config);
+    match rendered {
+        Some(rendered) => Some(RecommendationInjectionPreview {
+            generated_at: Utc::now(),
+            source: "pending_recommendations",
+            note: "Preview only: this text has not been inserted yet. It will be inserted before the next normal model request if the recommendations are still valid."
+                .to_string(),
+            context_text: rendered.text,
+            recommendation_ids: rendered.recommendation_ids,
+        }),
+        None => {
+            warnings.push(
+                "pending recommendations exist, but none fit the current injection score or character budget"
+                    .to_string(),
+            );
+            None
+        }
+    }
 }
 
 async fn update_recommendation_runtime_config(
@@ -525,13 +650,85 @@ const INDEX_HTML: &str = r#"<!doctype html>
       color: var(--muted);
       font-size: 14px;
     }
+    .context-layout {
+      height: 100%;
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      background: var(--canvas-parchment);
+    }
+    .context-sidebar,
+    .context-main {
+      min-width: 0;
+      overflow: auto;
+      padding: 24px;
+    }
+    .context-sidebar {
+      border-right: 1px solid var(--hairline);
+      background: var(--canvas);
+    }
+    .context-card {
+      border: 1px solid var(--hairline);
+      border-radius: 18px;
+      background: var(--canvas);
+      padding: 17px;
+      margin-bottom: 12px;
+      cursor: pointer;
+    }
+    .context-card.active,
+    .context-card:hover {
+      border-color: var(--primary);
+    }
+    .context-card.preview {
+      border-color: #f59e0b;
+      background: #fff7ed;
+    }
+    .context-title {
+      margin: 0 0 4px;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: -0.224px;
+    }
+    .context-meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.43;
+      letter-spacing: -0.12px;
+      overflow-wrap: anywhere;
+    }
+    .context-panel {
+      border: 1px solid var(--hairline);
+      border-radius: 18px;
+      background: var(--canvas);
+      padding: 24px;
+    }
+    .context-pre {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: var(--surface-tile);
+      color: #ffffff;
+      border-radius: 18px;
+      padding: 17px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.55;
+      letter-spacing: 0;
+    }
+    .ctx-tag { color: #2997ff; font-weight: 600; }
+    .ctx-action { color: #fde68a; }
+    .ctx-entity { color: #93c5fd; font-weight: 600; }
+    .ctx-score { color: #bbf7d0; }
+    .ctx-evidence { color: #c4b5fd; }
+    .ctx-why { color: #fed7aa; }
     @media (max-width: 920px) {
       header { gap: 8px; padding: 0 12px; }
       .recommendation-layout,
+      .context-layout,
       .chain-layout {
         grid-template-columns: 1fr;
       }
       .ranking-controls,
+      .context-sidebar,
       aside {
         border-right: 0;
         border-left: 0;
@@ -586,6 +783,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let cy = null;
     let graphData = null;
     let recommendationSummary = null;
+    let injectionSnapshots = null;
     let currentWeights = {};
     let activeGraphSignature = '';
 
@@ -612,6 +810,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
         tab.className = 'tab';
         tab.dataset.view = 'ranking-view';
         tab.textContent = 'Recommendation ranking';
+        tabs.appendChild(tab);
+      }
+      if (tabs && !document.querySelector('[data-view="context-view"]')) {
+        const tab = document.createElement('button');
+        tab.className = 'tab';
+        tab.dataset.view = 'context-view';
+        tab.textContent = 'Injected context';
         tabs.appendChild(tab);
       }
       if (main && !document.getElementById('ranking-view')) {
@@ -653,6 +858,37 @@ const INDEX_HTML: &str = r#"<!doctype html>
         `;
         main.appendChild(section);
       }
+      if (main && !document.getElementById('context-view')) {
+        const section = document.createElement('section');
+        section.id = 'context-view';
+        section.className = 'view';
+        section.innerHTML = `
+          <div class="context-layout">
+            <aside class="context-sidebar">
+              <div class="ranking-header">
+                <div>
+                  <h2>Injected context</h2>
+                  <div id="context-meta" class="ranking-meta"></div>
+                </div>
+              </div>
+              <div id="context-list"></div>
+            </aside>
+            <section class="context-main">
+              <div class="context-panel">
+                <div class="ranking-header">
+                  <div>
+                    <h2>Prompt context snapshot</h2>
+                    <div id="context-detail-meta" class="ranking-meta"></div>
+                  </div>
+                </div>
+                <div id="context-warnings"></div>
+                <pre id="context-detail" class="context-pre">No injected recommendation context yet.</pre>
+              </div>
+            </section>
+          </div>
+        `;
+        main.appendChild(section);
+      }
     }
 
     function normalizeChromeText() {
@@ -661,6 +897,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const graphTab = document.querySelector('[data-view="graph-view"]');
       const chainTab = document.querySelector('[data-view="chain-view"]');
       const rankingTab = document.querySelector('[data-view="ranking-view"]');
+      const contextTab = document.querySelector('[data-view="context-view"]');
       const detailTitle = document.querySelector('aside h2');
       const detail = document.getElementById('detail');
       if (turnOption) turnOption.textContent = 'Current turn';
@@ -668,6 +905,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (graphTab) graphTab.textContent = 'Entity graph';
       if (chainTab) chainTab.textContent = 'Agent call chain';
       if (rankingTab) rankingTab.textContent = 'Recommendation ranking';
+      if (contextTab) contextTab.textContent = 'Injected context';
       if (detailTitle) detailTitle.textContent = 'Call detail';
       if (detail) detail.textContent = 'Select a tool call node.';
     }
@@ -684,6 +922,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       renderGraph();
       renderChain();
       await loadRecommendationSummary();
+      await loadRecommendationInjections();
     }
 
     async function loadRecommendationSummary() {
@@ -712,6 +951,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (maxChars) maxChars.value = String(config.max_total_chars || 1200);
       if (enabled) enabled.checked = config.enabled !== false;
       renderRecommendationRanking();
+    }
+
+    async function loadRecommendationInjections() {
+      const params = new URLSearchParams({
+        scope: scopeEl.value,
+        limit: '20'
+      });
+      const res = await fetch('/api/recommendations/injections?' + params.toString());
+      injectionSnapshots = await res.json();
+      renderInjectedContext();
     }
 
     async function applyRuntimeConfig() {
@@ -851,6 +1100,85 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
         </article>
       `;
+    }
+
+    function renderInjectedContext(selectedId) {
+      const list = document.getElementById('context-list');
+      const meta = document.getElementById('context-meta');
+      const detailMeta = document.getElementById('context-detail-meta');
+      const detail = document.getElementById('context-detail');
+      const warnings = document.getElementById('context-warnings');
+      if (!list || !meta || !detailMeta || !detail || !warnings) return;
+      if (!injectionSnapshots) {
+        list.innerHTML = '<div class="empty-state">No context data loaded.</div>';
+        return;
+      }
+      const injections = injectionSnapshots.injections || [];
+      const preview = injectionSnapshots.preview || null;
+      const generatedAt = injectionSnapshots.generated_at ? new Date(injectionSnapshots.generated_at).toLocaleString() : 'unknown time';
+      meta.textContent = `${injections.length} snapshots${preview ? ' / 1 preview' : ''} · scope ${injectionSnapshots.scope || scopeEl.value} · generated ${generatedAt}`;
+      warnings.innerHTML = (injectionSnapshots.warnings || [])
+        .map(item => `<p class="ranking-warning">${escapeHtml(item)}</p>`)
+        .join('');
+      if (!injections.length && !preview) {
+        list.innerHTML = '<div class="empty-state">No injected recommendation context or pending preview yet.</div>';
+        detailMeta.textContent = 'No context available';
+        detail.innerHTML = 'No injected recommendation context has been recorded, and no pending recommendations can be rendered under the current runtime config.';
+        return;
+      }
+      const previewItem = preview ? { ...preview, id: '__preview__' } : null;
+      const items = previewItem ? [previewItem, ...injections] : injections;
+      const selected = items.find(item => item.id === selectedId) || items[0];
+      list.innerHTML = items.map(item => {
+        if (item.id === '__preview__') {
+          const count = (item.recommendation_ids || []).length;
+          return `
+            <article class="context-card preview ${item.id === selected.id ? 'active' : ''}" data-context-id="__preview__">
+              <h3 class="context-title">Pending context preview</h3>
+              <div class="context-meta">${count} recommendation${count === 1 ? '' : 's'} would be inserted</div>
+              <div class="context-meta">not yet injected</div>
+            </article>
+          `;
+        }
+        const created = item.created_at ? new Date(item.created_at).toLocaleString() : 'unknown time';
+        const count = (item.recommendation_ids || []).length;
+        return `
+          <article class="context-card ${item.id === selected.id ? 'active' : ''}" data-context-id="${escapeHtml(item.id)}">
+            <h3 class="context-title">${escapeHtml(created)}</h3>
+            <div class="context-meta">turn ${escapeHtml(item.turn_id || '')}</div>
+            <div class="context-meta">${count} recommendation${count === 1 ? '' : 's'} inserted</div>
+          </article>
+        `;
+      }).join('');
+      list.querySelectorAll('[data-context-id]').forEach(card => {
+        card.addEventListener('click', () => renderInjectedContext(card.dataset.contextId));
+      });
+      if (selected.id === '__preview__') {
+        const previewGenerated = selected.generated_at ? new Date(selected.generated_at).toLocaleString() : generatedAt;
+        detailMeta.textContent = `Preview generated ${previewGenerated} · ${selected.note || 'not yet injected'}`;
+        detail.innerHTML = highlightRecommendationContext(selected.context_text || '');
+        return;
+      }
+      const created = selected.created_at ? new Date(selected.created_at).toLocaleString() : 'unknown time';
+      detailMeta.textContent = `Inserted ${created} · session ${selected.session_id || ''} · turn ${selected.turn_id || ''}`;
+      detail.innerHTML = highlightRecommendationContext(selected.context_text || '');
+    }
+
+    function highlightRecommendationContext(value) {
+      return escapeHtml(value)
+        .split('\n')
+        .map(line => {
+          if (line.startsWith('&lt;repository_recommendations') || line.startsWith('&lt;/repository_recommendations')) {
+            return `<span class="ctx-tag">${line}</span>`;
+          }
+          if (line.trim().startsWith('action:')) return `<span class="ctx-action">${line}</span>`;
+          if (line.trim().startsWith('entity:')) return `<span class="ctx-entity">${line}</span>`;
+          if (line.trim().startsWith('score:')) return `<span class="ctx-score">${line}</span>`;
+          if (line.trim().startsWith('evidence:')) return `<span class="ctx-evidence">${line}</span>`;
+          if (line.trim().startsWith('why:')) return `<span class="ctx-why">${line}</span>`;
+          return line;
+        })
+        .join('\n');
     }
 
     function weight(key) {
@@ -1258,5 +1586,9 @@ mod tests {
         assert!(INDEX_HTML.contains("renderRecommendationRanking();"));
         assert!(INDEX_HTML.contains("loadGraphPositions"));
         assert!(INDEX_HTML.contains("applyEdgeLanes"));
+        assert!(INDEX_HTML.contains("/api/recommendations/injections"));
+        assert!(INDEX_HTML.contains("Injected context"));
+        assert!(INDEX_HTML.contains("highlightRecommendationContext"));
+        assert!(INDEX_HTML.contains("Pending context preview"));
     }
 }

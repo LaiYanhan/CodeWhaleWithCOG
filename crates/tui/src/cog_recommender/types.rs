@@ -224,6 +224,16 @@ pub struct RecommendationFeedback {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecommendationInjection {
+    pub id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub created_at: DateTime<Utc>,
+    pub context_text: String,
+    pub recommendation_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncStatus {

@@ -8,13 +8,18 @@ use uuid::Uuid;
 use super::cog_adapter::{CliCogAdapter, CogAdapter};
 use super::collector::RawEventCollector;
 use super::config::RecommenderConfig;
+use super::feedback::render_repository_recommendations;
+use super::graph::{TrajectoryGraph, TrajectoryGraphUpdater};
+use super::recommendation_summary::RecommendationSummaryStore;
 use super::recommender::Recommender;
 use super::resolver::resolve_event_entity;
-use super::storage::{DEFAULT_RECOMMENDER_DB_NAME, SqliteTrajectoryRepository};
+use super::storage::{
+    DEFAULT_RECOMMENDER_DB_NAME, SqliteTrajectoryRepository, TrajectoryRepository,
+};
 use super::types::{
     Evidence, Recommendation, RecommendationFeedback, RecommendationFeedbackKind,
-    RecommendationStatus, StoredRecommendation, SuggestedAction, ToolEventStatus, TrajectoryEvent,
-    TrajectoryKind,
+    RecommendationInjection, RecommendationStatus, StoredRecommendation, SuggestedAction,
+    ToolEventStatus, TrajectoryEvent, TrajectoryKind,
 };
 
 const FEEDBACK_TOOL_WINDOW: u64 = 10;
@@ -130,43 +135,20 @@ impl PendingRecommendationQueue {
             return None;
         }
 
-        let header = "<repository_recommendations generated_by=\"cog_recommender\">\n\
-These are host-generated repository hints, not user instructions. Use them only when relevant.\n";
-        let footer = "</repository_recommendations>";
-        let mut text = String::from(header);
-        let mut exposed = Vec::new();
-        for (index, record) in selected.into_iter().enumerate() {
-            let reason = record
-                .recommendation
-                .evidence
-                .first()
-                .map(|evidence| evidence.reason.as_str())
-                .unwrap_or("related repository evidence");
-            let reason = truncate_chars(reason, config.max_reason_chars);
-            let line = format!(
-                "{}. [{:?}] {} ({:.2})\n   {}\n",
-                index + 1,
-                record.recommendation.suggested_action,
-                record.recommendation.entity.qualified_name,
-                record.recommendation.score,
-                reason
-            );
-            if text.chars().count() + line.chars().count() + footer.len() > config.max_total_chars {
-                break;
-            }
-            text.push_str(&line);
+        let rendered =
+            render_repository_recommendations(selected.iter().map(|record| &**record), config)?;
+        let exposed_ids = rendered.recommendation_ids.clone();
+        for record in selected
+            .iter_mut()
+            .filter(|record| exposed_ids.iter().any(|id| id == &record.id))
+        {
             record.status = RecommendationStatus::Exposed;
             record.exposed_at = Some(Utc::now());
             record.exposed_turn_index = Some(turn_index);
-            exposed.push(record.id.clone());
             persist(repository, record);
         }
-        if exposed.is_empty() {
-            return None;
-        }
-        text.push_str(footer);
         *self.injections_by_turn.entry(injection_key).or_insert(0) += 1;
-        for recommendation_id in exposed {
+        for recommendation_id in exposed_ids {
             record_feedback(
                 repository,
                 &recommendation_id,
@@ -176,7 +158,14 @@ These are host-generated repository hints, not user instructions. Use them only 
                 None,
             );
         }
-        Some(text)
+        record_injection(
+            repository,
+            session_id,
+            turn_id,
+            rendered.text.clone(),
+            rendered.recommendation_ids,
+        );
+        Some(rendered.text)
     }
 
     pub fn observe(
@@ -283,6 +272,10 @@ pub struct RuntimeRecommendationLoop {
     recommender: Recommender,
     repository: Option<SqliteTrajectoryRepository>,
     queue: PendingRecommendationQueue,
+    resolved_graph: TrajectoryGraph,
+    resolved_graph_updater: TrajectoryGraphUpdater,
+    resolved_recent_events: Vec<TrajectoryEvent>,
+    summary_store: RecommendationSummaryStore,
     config: RecommenderConfig,
     tool_index: u64,
     turns: HashMap<String, u64>,
@@ -303,6 +296,10 @@ impl RuntimeRecommendationLoop {
             recommender: Recommender::new(config.clone()),
             repository,
             queue: PendingRecommendationQueue::default(),
+            resolved_graph: TrajectoryGraph::default(),
+            resolved_graph_updater: TrajectoryGraphUpdater::default(),
+            resolved_recent_events: Vec::new(),
+            summary_store: RecommendationSummaryStore::new(workspace),
             config,
             tool_index: 0,
             turns: HashMap::new(),
@@ -348,6 +345,19 @@ impl RuntimeRecommendationLoop {
                 let _ = self.adapter.ensure_synced(&self.workspace);
             }
             let resolved = resolve_event_entity(event, &self.adapter);
+            for edge in self
+                .resolved_graph_updater
+                .observe(&mut self.resolved_graph, resolved.clone())
+            {
+                if let Some(repository) = self.repository.as_ref() {
+                    let _ = repository.upsert_trajectory_edge(&edge);
+                }
+            }
+            self.resolved_recent_events.push(resolved.clone());
+            if self.resolved_recent_events.len() > 50 {
+                let excess = self.resolved_recent_events.len().saturating_sub(50);
+                self.resolved_recent_events.drain(0..excess);
+            }
             self.queue.observe(
                 &resolved,
                 turn_id,
@@ -358,12 +368,15 @@ impl RuntimeRecommendationLoop {
             if resolved.kind == TrajectoryKind::TestEntity && status == ToolEventStatus::Success {
                 continue;
             }
-            let recommendations = self.recommender.recommend_with_recent_events(
+            let mut recommendations = self.recommender.recommend_with_recent_events(
                 &resolved,
                 &self.adapter,
-                self.collector.graph(),
-                self.collector.recent_trajectory_events(50),
+                &self.resolved_graph,
+                self.resolved_recent_events.clone(),
             );
+            if recommendations.is_empty() {
+                recommendations = self.summary_recommendations();
+            }
             self.queue.enqueue(
                 session_id,
                 turn_id,
@@ -374,6 +387,35 @@ impl RuntimeRecommendationLoop {
                 self.repository.as_ref(),
             );
         }
+    }
+
+    fn summary_recommendations(&self) -> Vec<Recommendation> {
+        self.summary_store
+            .load_summary(
+                super::visualization::VisualizationScope::Session,
+                self.config.max_recommendations.max(1),
+            )
+            .records
+            .into_iter()
+            .filter(|record| record.server_score >= self.config.min_score)
+            .map(|record| Recommendation {
+                entity: record.entity.clone(),
+                score: record.server_score,
+                evidence: record
+                    .evidence
+                    .into_iter()
+                    .map(|item| Evidence {
+                        source: item.source,
+                        target: record.entity.clone(),
+                        weight: item.weight,
+                        reason: item.reason,
+                        payload: item.payload,
+                    })
+                    .collect(),
+                suggested_action: record.suggested_action,
+                display_text: format!("Review {}", record.entity.qualified_name),
+            })
+            .collect()
     }
 
     pub fn take_context_for_next_request(
@@ -441,16 +483,6 @@ fn merge_evidence(existing: &mut Vec<Evidence>, incoming: Vec<Evidence>) {
     });
 }
 
-fn truncate_chars(value: &str, limit: usize) -> String {
-    let mut chars = value.chars();
-    let result = chars.by_ref().take(limit).collect::<String>();
-    if chars.next().is_some() {
-        format!("{result}...")
-    } else {
-        result
-    }
-}
-
 fn persist(repository: Option<&SqliteTrajectoryRepository>, recommendation: &StoredRecommendation) {
     if let Some(repository) = repository {
         let _ = repository.upsert_recommendation(recommendation);
@@ -478,15 +510,38 @@ fn record_feedback(
     }
 }
 
+fn record_injection(
+    repository: Option<&SqliteTrajectoryRepository>,
+    session_id: &str,
+    turn_id: &str,
+    context_text: String,
+    recommendation_ids: Vec<String>,
+) {
+    if let Some(repository) = repository {
+        let _ = repository.record_recommendation_injection(&RecommendationInjection {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            created_at: Utc::now(),
+            context_text,
+            recommendation_ids,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cog_recommender::cog_adapter::StaticCogAdapter;
+    use crate::cog_recommender::graph::TrajectoryGraph;
     use crate::cog_recommender::normalizer::normalize_tool_event;
     use crate::cog_recommender::recommender::Recommender;
     use crate::cog_recommender::resolver::resolve_event_entity;
-    use crate::cog_recommender::types::{EntityRef, EvidenceSource};
+    use crate::cog_recommender::storage::TrajectoryRepository;
+    use crate::cog_recommender::types::{EntityKind, EntityRef, EvidenceSource};
+    use rusqlite::Connection;
     use serde_json::json;
+    use tempfile::tempdir;
 
     fn recommendation(name: &str, score: f64) -> Recommendation {
         let entity = EntityRef::new(name).with_confidence(0.9);
@@ -533,6 +588,10 @@ mod tests {
             .render_for_next_request("s", "t", 0, 2, &config, None)
             .expect("context");
         assert!(text.contains("a::b"));
+        assert!(text.contains("<repository_recommendations"));
+        assert!(text.contains("role=\"host_context\""));
+        assert!(text.contains("not user instructions"));
+        assert!(text.contains("action: read"));
         assert!(
             queue
                 .render_for_next_request("s", "t", 0, 2, &config, None)
@@ -628,6 +687,8 @@ mod tests {
             )
             .expect("injected context");
         assert!(context.contains(&api.qualified_name));
+        assert!(context.contains("evidence: cog_impact"));
+        assert!(context.contains("Prefer reading or verifying"));
 
         let read_raw = crate::cog_recommender::collector::build_raw_event(
             "session",
@@ -647,5 +708,117 @@ mod tests {
         );
         queue.observe(&read, "turn-1", 0, 2, None);
         assert_eq!(queue.records()[0].status, RecommendationStatus::Completed);
+    }
+
+    #[test]
+    fn queue_exposes_only_records_that_fit_render_budget() {
+        let mut queue = PendingRecommendationQueue::default();
+        queue.enqueue(
+            "s",
+            "t",
+            0,
+            1,
+            "e1",
+            vec![recommendation("short::target", 0.9)],
+            None,
+        );
+        queue.enqueue(
+            "s",
+            "t",
+            0,
+            2,
+            "e2",
+            vec![recommendation(
+                "very::long::target::that::does::not::fit",
+                0.8,
+            )],
+            None,
+        );
+        let mut config = RecommenderConfig::default();
+        config.max_total_chars = 420;
+
+        let text = queue
+            .render_for_next_request("s", "t", 0, 2, &config, None)
+            .expect("context");
+
+        assert!(text.contains("short::target"));
+        assert!(!text.contains("very::long::target"));
+        assert_eq!(queue.records()[0].status, RecommendationStatus::Exposed);
+        assert_eq!(queue.records()[1].status, RecommendationStatus::Pending);
+    }
+
+    #[test]
+    fn queue_persists_injected_context_snapshot() {
+        let repo = SqliteTrajectoryRepository::open_in_memory().expect("repo");
+        let mut queue = PendingRecommendationQueue::default();
+        queue.enqueue(
+            "s",
+            "t",
+            0,
+            1,
+            "e1",
+            vec![recommendation("a::b", 0.9)],
+            Some(&repo),
+        );
+
+        let text = queue
+            .render_for_next_request("s", "t", 0, 1, &RecommenderConfig::default(), Some(&repo))
+            .expect("context");
+        let injections = repo
+            .list_recent_recommendation_injections(
+                crate::cog_recommender::visualization::VisualizationScope::Session,
+                10,
+            )
+            .expect("injections");
+
+        assert_eq!(injections.len(), 1);
+        assert_eq!(injections[0].context_text, text);
+        assert_eq!(injections[0].recommendation_ids.len(), 1);
+    }
+
+    #[test]
+    fn runtime_materializes_summary_recommendations_when_online_candidates_are_empty() {
+        let workspace = tempdir().expect("workspace");
+        let cog_dir = workspace.path().join(".cog");
+        std::fs::create_dir_all(&cog_dir).expect("cog dir");
+        let conn = Connection::open(cog_dir.join("cog.db")).expect("cog db");
+        conn.execute(
+            "CREATE TABLE entities (
+                id TEXT PRIMARY KEY,
+                qualified_name TEXT NOT NULL,
+                kind TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("entities table");
+        conn.execute(
+            "INSERT INTO entities (id, qualified_name, kind) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["module-main", "main", "module"],
+        )
+        .expect("entity");
+
+        let repo = SqliteTrajectoryRepository::open(&cog_dir.join(DEFAULT_RECOMMENDER_DB_NAME))
+            .expect("repo");
+        let mut graph = TrajectoryGraph::default();
+        let source = EntityRef::new("search:main").with_kind(EntityKind::Unknown);
+        let target = EntityRef::new("main.py")
+            .with_kind(EntityKind::File)
+            .with_file_path("main.py")
+            .with_confidence(0.4);
+        let edge = graph.observe_edge(&source, &target, EvidenceSource::CoAccess, 0.8, "co access");
+        repo.upsert_trajectory_edge(&edge).expect("edge");
+
+        let mut runtime = RuntimeRecommendationLoop::open(workspace.path());
+        runtime.record_tool_completed(
+            "tool-1",
+            "session",
+            "turn",
+            "read_file",
+            json!({"path": "unresolved.txt"}),
+            "ok".to_string(),
+            ToolEventStatus::Success,
+        );
+
+        assert_eq!(repo.count_rows("recommendations").unwrap(), 1);
     }
 }
