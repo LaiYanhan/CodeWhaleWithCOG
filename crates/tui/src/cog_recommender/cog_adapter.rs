@@ -61,7 +61,7 @@ impl CliCogAdapter {
     }
 }
 
-fn resolve_cog_binary() -> PathBuf {
+pub(crate) fn resolve_cog_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("COG_BINARY")
         && !path.is_empty()
     {

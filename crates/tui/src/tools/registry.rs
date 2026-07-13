@@ -608,6 +608,12 @@ impl ToolRegistryBuilder {
         self.with_tool(Arc::new(DiagnosticsTool))
     }
 
+    /// Include native COG graph query and assertion tools.
+    #[must_use]
+    pub fn with_cog_tools(self) -> Self {
+        self.with_tool(Arc::new(super::cog::CogTool))
+    }
+
     /// Include the `pandoc_convert` tool only when the `pandoc`
     /// binary is present on this host. Same probe-then-decide
     /// pattern v0.8.31 introduced for Python — when pandoc is
@@ -1014,6 +1020,7 @@ impl ToolRegistryBuilder {
         let speech_client = client.clone();
         let mut builder = self
             .with_agent_tools_policy(options.shell_policy)
+            .with_cog_tools()
             .with_todo_tool(todo_list)
             .with_plan_tool(plan_state)
             .with_review_tool(client.clone(), model.clone())
