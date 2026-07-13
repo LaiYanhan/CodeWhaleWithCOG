@@ -83,7 +83,10 @@ fn same_turn(left: &TrajectoryEvent, right: &TrajectoryEvent) -> bool {
 fn event_is_seen_attention(event: &TrajectoryEvent) -> bool {
     matches!(
         event.kind,
-        TrajectoryKind::ReadEntity | TrajectoryKind::EditEntity | TrajectoryKind::CogWrite
+        TrajectoryKind::ReadEntity
+            | TrajectoryKind::EditEntity
+            | TrajectoryKind::TestEntity
+            | TrajectoryKind::CogWrite
     )
 }
 

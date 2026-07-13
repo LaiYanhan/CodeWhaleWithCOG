@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS trajectory_edges (
     edge_type TEXT NOT NULL,
     weight REAL NOT NULL,
     count INTEGER NOT NULL,
+    mean_step_distance REAL NOT NULL DEFAULT 1.0,
     reason TEXT NOT NULL,
     last_seen_ts TEXT NOT NULL,
     PRIMARY KEY (source_entity, target_entity, edge_type)
@@ -688,13 +689,14 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
         self.conn.execute(
             "INSERT INTO trajectory_edges
              (source_entity, source_json, target_entity, target_json, edge_type,
-              weight, count, reason, last_seen_ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+              weight, count, mean_step_distance, reason, last_seen_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(source_entity, target_entity, edge_type) DO UPDATE SET
                 source_json = excluded.source_json,
                 target_json = excluded.target_json,
                 weight = excluded.weight,
                 count = excluded.count,
+                mean_step_distance = excluded.mean_step_distance,
                 reason = excluded.reason,
                 last_seen_ts = excluded.last_seen_ts",
             params![
@@ -705,6 +707,7 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
                 to_enum_text(&edge.edge_type)?,
                 edge.weight,
                 edge.count,
+                edge.mean_step_distance,
                 edge.reason,
                 edge.last_seen_ts.to_rfc3339(),
             ],
@@ -738,7 +741,7 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
 
     fn list_trajectory_edges(&self) -> Result<Vec<EdgeStats>> {
         let mut stmt = self.conn.prepare(
-            "SELECT source_json, target_json, edge_type, weight, count, reason, last_seen_ts
+            "SELECT source_json, target_json, edge_type, weight, count, mean_step_distance, reason, last_seen_ts
              FROM trajectory_edges
              ORDER BY last_seen_ts DESC",
         )?;
@@ -753,7 +756,24 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)
         .context("failed to initialize recommender sqlite schema")?;
     ensure_tool_events_origin_column(conn)?;
+    ensure_trajectory_edges_step_distance_column(conn)?;
     ensure_recommendation_injections_context_excerpt_column(conn)?;
+    Ok(())
+}
+
+fn ensure_trajectory_edges_step_distance_column(conn: &Connection) -> Result<()> {
+    let has_column = conn
+        .prepare("PRAGMA table_info(trajectory_edges)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "mean_step_distance");
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE trajectory_edges ADD COLUMN mean_step_distance REAL NOT NULL DEFAULT 1.0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -886,7 +906,7 @@ fn map_edge_row(row: &Row<'_>) -> rusqlite::Result<Result<EdgeStats>> {
     let target_json: String = row.get(1)?;
     let edge_type: String = row.get(2)?;
     let count: i64 = row.get(4)?;
-    let last_seen_ts: String = row.get(6)?;
+    let last_seen_ts: String = row.get(7)?;
     Ok((|| {
         Ok(EdgeStats {
             source: from_json(&source_json)?,
@@ -894,7 +914,8 @@ fn map_edge_row(row: &Row<'_>) -> rusqlite::Result<Result<EdgeStats>> {
             edge_type: enum_from_text::<EvidenceSource>(&edge_type)?,
             weight: row.get(3)?,
             count: u32::try_from(count).unwrap_or(u32::MAX),
-            reason: row.get(5)?,
+            mean_step_distance: row.get(5)?,
+            reason: row.get(6)?,
             last_seen_ts: parse_ts(&last_seen_ts)?,
         })
     })())
@@ -1022,6 +1043,7 @@ mod tests {
             edge_type: EvidenceSource::ReadBeforeEdit,
             weight: 0.2,
             count: 1,
+            mean_step_distance: 1.0,
             reason: "read before edit".into(),
             last_seen_ts: Utc::now(),
         };

@@ -1129,13 +1129,17 @@ mod tests {
     }
 
     #[test]
-    fn queue_rejects_path_like_file_recommendations() {
+    fn queue_keeps_file_recommendation_as_a_fallback() {
         let mut queue = PendingRecommendationQueue::default();
         let mut file = recommendation("D:\\workspace\\static\\index.html", 0.9);
         file.entity.kind = EntityKind::File;
         queue.enqueue("s", "t", 0, 1, "e1", vec![file], None);
 
-        assert!(queue.records().is_empty());
+        assert_eq!(queue.records().len(), 1);
+        assert_eq!(
+            queue.records()[0].recommendation.entity.kind,
+            EntityKind::File
+        );
     }
 
     #[test]
