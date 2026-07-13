@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 
 use super::types::{EntityKind, EntityRef, Evidence, EvidenceSource, SyncStatus};
@@ -20,18 +21,18 @@ pub trait CogAdapter {
 #[derive(Debug, Clone)]
 pub struct CliCogAdapter {
     workspace: PathBuf,
-    cog_binary: String,
+    cog_binary: PathBuf,
 }
 
 impl CliCogAdapter {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
-            cog_binary: "cog".to_string(),
+            cog_binary: resolve_cog_binary(),
         }
     }
 
-    pub fn with_binary(mut self, cog_binary: impl Into<String>) -> Self {
+    pub fn with_binary(mut self, cog_binary: impl Into<PathBuf>) -> Self {
         self.cog_binary = cog_binary.into();
         self
     }
@@ -43,7 +44,7 @@ impl CliCogAdapter {
             .arg("json")
             .args(args)
             .output()
-            .map_err(|err| format!("failed to execute {}: {err}", self.cog_binary))?;
+            .map_err(|err| format!("failed to execute {}: {err}", self.cog_binary.display()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -60,17 +61,49 @@ impl CliCogAdapter {
     }
 }
 
+fn resolve_cog_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("COG_BINARY")
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
+    }
+    let executable_name = if cfg!(windows) { "cog.exe" } else { "cog" };
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let sibling = parent.join(executable_name);
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for profile in ["release", "debug"] {
+        let candidate = manifest
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("cog")
+            .join("target")
+            .join(profile)
+            .join(executable_name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from("cog")
+}
+
 impl CogAdapter for CliCogAdapter {
     fn ensure_synced(&self, workspace: &Path) -> SyncStatus {
-        let has_db = workspace.join(".cog").join("cog.db").exists();
-        let args: Vec<&str> = if has_db {
+        let initialized = cog_db_is_initialized(&workspace.join(".cog").join("cog.db"));
+        let args: Vec<&str> = if initialized {
             vec!["sync"]
         } else {
             vec!["sync", "--init"]
         };
 
         match self.run_cog(&args) {
-            Ok(_) if has_db => SyncStatus::Synced,
+            Ok(_) if initialized => SyncStatus::Synced,
             Ok(_) => SyncStatus::Initialized,
             Err(err) => SyncStatus::Degraded(err),
         }
@@ -166,6 +199,23 @@ impl CogAdapter for CliCogAdapter {
             })
             .collect()
     }
+}
+
+fn cog_db_is_initialized(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(conn) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    ["entities", "entity_relations"].iter().all(|table| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -301,7 +351,9 @@ impl CogAdapter for StaticCogAdapter {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
     use serde_json::json;
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -352,5 +404,22 @@ mod tests {
 
         assert_eq!(evidence[0].qualified_name, "B");
         assert_eq!(evidence[0].kind, EntityKind::Type);
+    }
+
+    #[test]
+    fn empty_cog_file_is_not_treated_as_initialized() {
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join("cog.db");
+        std::fs::File::create(&path).expect("empty cog db");
+
+        assert!(!cog_db_is_initialized(&path));
+
+        let conn = Connection::open(&path).expect("cog db");
+        conn.execute_batch(
+            "CREATE TABLE entities (id TEXT PRIMARY KEY);
+             CREATE TABLE entity_relations (id TEXT PRIMARY KEY);",
+        )
+        .expect("schema");
+        assert!(cog_db_is_initialized(&path));
     }
 }

@@ -177,6 +177,8 @@ pub struct Recommendation {
     pub score: f64,
     pub evidence: Vec<Evidence>,
     pub suggested_action: SuggestedAction,
+    #[serde(default)]
+    pub tool_path: Vec<String>,
     pub display_text: String,
 }
 

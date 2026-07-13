@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use serde_json::json;
 
@@ -12,7 +12,7 @@ use super::graph::EdgeStats;
 use super::storage::{
     DEFAULT_RECOMMENDER_DB_NAME, SqliteTrajectoryRepository, TrajectoryRepository,
 };
-use super::types::{EntityKind, EntityRef, EvidenceSource, SuggestedAction};
+use super::types::{EntityKind, EntityRef, EvidenceSource, StoredRecommendation, SuggestedAction};
 use super::visualization::VisualizationScope;
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +57,7 @@ impl RecommendationWeights {
 pub struct RecommendationSummaryRecord {
     pub entity: EntityRef,
     pub suggested_action: SuggestedAction,
+    pub tool_path: Vec<String>,
     pub server_score: f64,
     pub score_parts: RecommendationScoreParts,
     pub evidence: Vec<RecommendationEvidenceSummary>,
@@ -97,25 +98,36 @@ impl RecommendationSummaryStore {
 
     pub fn load_summary(&self, scope: VisualizationScope, limit: usize) -> RecommendationSummary {
         let mut warnings = Vec::new();
-        let weights = RecommendationWeights::from_config(&RecommenderConfig::default());
-        let edges = match self.load_edges() {
-            Ok(edges) => edges,
-            Err(err) => {
-                warnings.push(format!("failed to load trajectory edges: {err}"));
+        let config = self.load_config().unwrap_or_default();
+        let weights = RecommendationWeights::from_config(&config);
+        let runtime_records = self
+            .load_runtime_recommendations(scope, limit)
+            .unwrap_or_else(|err| {
+                warnings.push(format!("failed to load runtime recommendations: {err}"));
                 Vec::new()
-            }
+            });
+        let mut records = if runtime_records.is_empty() {
+            let edges = match self.load_edges() {
+                Ok(edges) => edges,
+                Err(err) => {
+                    warnings.push(format!("failed to load trajectory edges: {err}"));
+                    Vec::new()
+                }
+            };
+            let cog_entities = match self.load_cog_entities() {
+                Ok(entities) => entities,
+                Err(err) => {
+                    warnings.push(format!(
+                        "failed to load COG entities for recommendation projection: {err}"
+                    ));
+                    Vec::new()
+                }
+            };
+            records_from_edges(edges, weights, &cog_entities, &mut warnings)
+        } else {
+            records_from_stored_recommendations(runtime_records, weights)
         };
-        let cog_entities = match self.load_cog_entities() {
-            Ok(entities) => entities,
-            Err(err) => {
-                warnings.push(format!(
-                    "failed to load COG entities for recommendation projection: {err}"
-                ));
-                Vec::new()
-            }
-        };
-
-        let mut records = records_from_edges(edges, weights, &cog_entities, &mut warnings);
+        records = suppress_parent_module_records(records);
         records.sort_by(|left, right| {
             right
                 .server_score
@@ -152,6 +164,32 @@ impl RecommendationSummaryStore {
         repo.list_trajectory_edges()
     }
 
+    fn load_config(&self) -> anyhow::Result<RecommenderConfig> {
+        let path = self
+            .workspace
+            .join(".cog")
+            .join(DEFAULT_RECOMMENDER_DB_NAME);
+        if !path.exists() {
+            return Ok(RecommenderConfig::default());
+        }
+        SqliteTrajectoryRepository::open(&path)?.load_runtime_config()
+    }
+
+    fn load_runtime_recommendations(
+        &self,
+        scope: VisualizationScope,
+        limit: usize,
+    ) -> anyhow::Result<Vec<StoredRecommendation>> {
+        let path = self
+            .workspace
+            .join(".cog")
+            .join(DEFAULT_RECOMMENDER_DB_NAME);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        SqliteTrajectoryRepository::open(&path)?.list_recent_recommendations(scope, limit)
+    }
+
     fn load_cog_entities(&self) -> anyhow::Result<Vec<EntityRef>> {
         let path = self.workspace.join(".cog").join("cog.db");
         if !path.exists() {
@@ -159,6 +197,26 @@ impl RecommendationSummaryStore {
         }
         load_cog_entities_from_db(&path)
     }
+}
+
+fn suppress_parent_module_records(
+    records: Vec<RecommendationSummaryRecord>,
+) -> Vec<RecommendationSummaryRecord> {
+    let concrete_names = records
+        .iter()
+        .filter(|record| record.entity.kind != EntityKind::Module)
+        .map(|record| record.entity.qualified_name.clone())
+        .collect::<HashSet<_>>();
+
+    records
+        .into_iter()
+        .filter(|record| {
+            record.entity.kind != EntityKind::Module
+                || !concrete_names
+                    .iter()
+                    .any(|name| name.starts_with(&format!("{}::", record.entity.qualified_name)))
+        })
+        .collect()
 }
 
 fn aggregate_projection_warnings(warnings: &mut Vec<String>) {
@@ -204,10 +262,12 @@ fn records_from_edges(
                 .cog_entity_id
                 .clone()
                 .unwrap_or_else(|| target.qualified_name.clone());
+            let observation_confidence = 0.65 + 0.35 * (1.0 - (-(edge.count as f64) / 3.0).exp());
+            let observed_weight = edge.weight * observation_confidence;
             let evidence_weight = if target.qualified_name == edge.target.qualified_name {
-                edge.weight
+                observed_weight
             } else {
-                (edge.weight * 0.8).min(1.0)
+                (observed_weight * 0.8).min(1.0)
             };
             grouped
                 .entry(key)
@@ -244,8 +304,10 @@ fn records_from_edges(
             if server_score <= 0.0 || evidence.iter().all(|item| item.reason.trim().is_empty()) {
                 return None;
             }
+            let suggested_action = suggested_action(&evidence);
             Some(RecommendationSummaryRecord {
-                suggested_action: suggested_action(&evidence),
+                tool_path: summary_tool_path(suggested_action, &evidence),
+                suggested_action,
                 entity,
                 server_score,
                 score_parts,
@@ -255,8 +317,76 @@ fn records_from_edges(
         .collect()
 }
 
+fn records_from_stored_recommendations(
+    records: Vec<StoredRecommendation>,
+    weights: RecommendationWeights,
+) -> Vec<RecommendationSummaryRecord> {
+    records
+        .into_iter()
+        .map(|stored| {
+            let evidence = stored
+                .recommendation
+                .evidence
+                .into_iter()
+                .map(|item| RecommendationEvidenceSummary {
+                    source: item.source,
+                    weight: item.weight,
+                    reason: item.reason,
+                    payload: item.payload,
+                })
+                .collect::<Vec<_>>();
+            let score_parts = score_parts(&stored.recommendation.entity, &evidence);
+            RecommendationSummaryRecord {
+                entity: stored.recommendation.entity,
+                suggested_action: stored.recommendation.suggested_action,
+                tool_path: stored.recommendation.tool_path,
+                server_score: score_from_parts(score_parts, weights),
+                score_parts,
+                evidence,
+            }
+        })
+        .collect()
+}
+
+fn summary_tool_path(
+    action: SuggestedAction,
+    evidence: &[RecommendationEvidenceSummary],
+) -> Vec<String> {
+    let has_error = evidence
+        .iter()
+        .any(|item| item.source == EvidenceSource::ErrorToEdit);
+    let has_search = evidence.iter().any(|item| {
+        matches!(
+            item.source,
+            EvidenceSource::SearchToRead | EvidenceSource::SearchToEdit
+        )
+    });
+    let mut path = if has_error {
+        vec!["inspect_error", "read_entity"]
+    } else if has_search {
+        vec!["search_entity", "read_entity"]
+    } else {
+        vec!["read_entity"]
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let tail = match action {
+        SuggestedAction::Read => None,
+        SuggestedAction::InspectImpact => Some("inspect_impact"),
+        SuggestedAction::RunTest | SuggestedAction::Verify => Some("run_test"),
+        SuggestedAction::UpdateRelatedCode => Some("edit_entity"),
+    };
+    if let Some(tail) = tail
+        && !path.iter().any(|step| step == tail)
+    {
+        path.push(tail.to_string());
+    }
+    path
+}
+
 fn load_cog_entities_from_db(path: &Path) -> anyhow::Result<Vec<EntityRef>> {
-    let conn = Connection::open(path)?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt =
         conn.prepare("SELECT id, qualified_name, kind FROM entities ORDER BY qualified_name")?;
     let rows = stmt.query_map([], |row| {
@@ -531,7 +661,9 @@ mod tests {
     use super::*;
     use crate::cog_recommender::graph::TrajectoryGraph;
     use crate::cog_recommender::storage::TrajectoryRepository;
-    use crate::cog_recommender::types::{EntityKind, EntityRef};
+    use crate::cog_recommender::types::{
+        EntityKind, EntityRef, Evidence, Recommendation, RecommendationStatus, StoredRecommendation,
+    };
 
     #[test]
     fn summary_returns_empty_records_and_warning_without_db() {
@@ -570,8 +702,72 @@ mod tests {
 
         assert_eq!(summary.records.len(), 1);
         assert_eq!(summary.records[0].entity.qualified_name, "src::api");
-        assert_eq!(summary.records[0].score_parts.trajectory, 0.5);
+        let first_score = summary.records[0].score_parts.trajectory;
+        assert!(first_score > 0.3 && first_score < 0.5);
         assert!(summary.records[0].server_score > 0.0);
+
+        let repeated = graph.observe_edge(
+            &source,
+            &target,
+            EvidenceSource::ReadBeforeEdit,
+            0.5,
+            "read before edit",
+        );
+        repo.upsert_trajectory_edge(&repeated)
+            .expect("repeated edge");
+        let repeated_summary = RecommendationSummaryStore::new(workspace.path())
+            .load_summary(VisualizationScope::Session, 100);
+        assert!(repeated_summary.records[0].score_parts.trajectory > first_score);
+    }
+
+    #[test]
+    fn summary_prefers_runtime_recommendation_records_over_edge_fallback() {
+        let workspace = tempdir().expect("workspace");
+        let db_path = workspace
+            .path()
+            .join(".cog")
+            .join(DEFAULT_RECOMMENDER_DB_NAME);
+        let repo = SqliteTrajectoryRepository::open(&db_path).expect("repo");
+        let entity = EntityRef::new("app::Board::reveal_cell")
+            .with_kind(EntityKind::Method)
+            .with_confidence(0.9);
+        let now = Utc::now();
+        repo.upsert_recommendation(&StoredRecommendation {
+            id: "runtime-rec".into(),
+            session_id: "session".into(),
+            turn_id: "turn".into(),
+            trigger_event_ids: vec!["event".into()],
+            recommendation: Recommendation {
+                entity: entity.clone(),
+                score: 0.8,
+                evidence: vec![Evidence::new(
+                    EvidenceSource::CogImpact,
+                    entity,
+                    0.8,
+                    "runtime impact",
+                )],
+                suggested_action: SuggestedAction::InspectImpact,
+                tool_path: vec!["read_entity".into(), "inspect_impact".into()],
+                display_text: "Inspect Board".into(),
+            },
+            status: RecommendationStatus::Exposed,
+            created_at: now,
+            last_triggered_at: now,
+            exposed_at: Some(now),
+            expires_at: now + chrono::Duration::minutes(15),
+            trigger_tool_index: 1,
+            exposed_turn_index: Some(0),
+        })
+        .expect("recommendation");
+
+        let summary = RecommendationSummaryStore::new(workspace.path())
+            .load_summary(VisualizationScope::Turn, 100);
+
+        assert_eq!(summary.records.len(), 1);
+        assert_eq!(
+            summary.records[0].entity.qualified_name,
+            "app::Board::reveal_cell"
+        );
     }
 
     #[test]
@@ -631,6 +827,42 @@ mod tests {
                     == Some("src/auth.rs")
             })
         }));
+    }
+
+    #[test]
+    fn summary_suppresses_module_when_nested_entity_has_evidence() {
+        let module = EntityRef::new("game")
+            .with_kind(EntityKind::Module)
+            .with_confidence(0.9);
+        let method = EntityRef::new("game::Board::reveal_cell")
+            .with_kind(EntityKind::Method)
+            .with_confidence(0.9);
+        let source = entity("search:game");
+        let mut graph = TrajectoryGraph::default();
+        let module_edge = graph.observe_edge(
+            &source,
+            &module,
+            EvidenceSource::CoAccess,
+            1.0,
+            "module co-access",
+        );
+        let method_edge = graph.observe_edge(
+            &source,
+            &method,
+            EvidenceSource::CoAccess,
+            0.4,
+            "method co-access",
+        );
+        let records = records_from_edges(
+            vec![module_edge, method_edge],
+            RecommendationWeights::from_config(&RecommenderConfig::default()),
+            &[],
+            &mut Vec::new(),
+        );
+        let records = suppress_parent_module_records(records);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].entity.qualified_name, "game::Board::reveal_cell");
     }
 
     #[test]

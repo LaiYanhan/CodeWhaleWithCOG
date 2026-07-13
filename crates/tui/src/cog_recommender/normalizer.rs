@@ -63,7 +63,7 @@ fn classify_event(raw: &RawToolEvent) -> Option<TrajectoryKind> {
     }
     if matches!(
         name,
-        "apply_patch" | "edit_file" | "write_file" | "fim_edit"
+        "apply_patch" | "edit_file" | "write_file" | "delete_file" | "remove_file" | "fim_edit"
     ) {
         return Some(TrajectoryKind::EditEntity);
     }

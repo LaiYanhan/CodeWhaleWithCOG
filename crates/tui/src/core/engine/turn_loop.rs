@@ -2389,6 +2389,16 @@ impl Engine {
                             (None, None, None)
                         };
 
+                        if let Ok(mut runtime) = self.cog_recommender_runtime.lock() {
+                            runtime.record_tool_started(
+                                &tool_id,
+                                &self.session.id,
+                                &turn.id,
+                                &tool_name,
+                                tool_input.clone(),
+                            );
+                        }
+
                         // Per-tool snapshot for surgical undo (#384): capture workspace
                         // state before file-modifying tools execute so `/undo` can
                         // revert the most recent write_file/edit_file/apply_patch.

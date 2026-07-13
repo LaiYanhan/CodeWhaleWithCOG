@@ -1079,6 +1079,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const fullName = entity.qualified_name || 'unknown entity';
       const short = shortName(fullName);
       const evidence = record.evidence || [];
+      const toolPath = (record.tool_path || []).map(step => escapeHtml(step)).join(' &rarr; ');
       const tags = evidence.slice(0, 6).map(item =>
         `<span class="evidence-tag">${escapeHtml(sourceLabel(item.source))} · ${formatScore(item.weight)}</span>`
       ).join('');
@@ -1091,6 +1092,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div>
             <h3 class="recommendation-title">${escapeHtml(short)}</h3>
             <div class="recommendation-subtitle">${escapeHtml(fullName)}</div>
+            ${toolPath ? `<div class="evidence-reason">Suggested tools: ${toolPath}</div>` : ''}
             <div class="recommendation-action">${escapeHtml(actionLabel(record.suggested_action))} · ${escapeHtml(entity.kind || 'unknown')}</div>
             <div class="evidence-tags">${tags}</div>
             ${reasons}
@@ -1228,9 +1230,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       for (let index = 0; index < entities.length; index += 1) {
         const entity = entities[index];
         let state = 'normal';
-        if (modified.has(entity.id)) state = 'modified';
-        else if (deleted.has(entity.id)) state = 'deleted';
+        if (deleted.has(entity.id)) state = 'deleted';
         else if (added.has(entity.id)) state = 'added';
+        else if (modified.has(entity.id)) state = 'modified';
         else if (impacted.has(entity.id)) state = 'impacted';
         const cached = cachedPositions?.[entity.id];
         elements.push({
@@ -1319,14 +1321,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
             'z-index': 7
           }},
           { selector: 'node[state = "deleted"]', style: {
-            'background-color': '#f5f5f7',
-            'border-color': '#6e6e73',
+            'background-color': '#f3e8ff',
+            'border-color': '#7e22ce',
             'border-style': 'dashed',
             'border-width': 4,
-            'color': '#6e6e73',
-            'shadow-blur': 24,
-            'shadow-color': '#6e6e73',
-            'shadow-opacity': 0.34,
+            'color': '#581c87',
+            'shadow-blur': 28,
+            'shadow-color': '#9333ea',
+            'shadow-opacity': 0.52,
             'shadow-offset-x': 0,
             'shadow-offset-y': 0,
             'z-index': 7

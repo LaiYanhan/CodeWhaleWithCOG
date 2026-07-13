@@ -531,6 +531,68 @@ impl SqliteTrajectoryRepository {
         }
     }
 
+    pub fn list_recent_recommendations(
+        &self,
+        scope: super::visualization::VisualizationScope,
+        limit: usize,
+    ) -> Result<Vec<StoredRecommendation>> {
+        let columns = "id, session_id, turn_id, trigger_event_ids_json, recommendation_json,
+                       status, created_at, last_triggered_at, exposed_at, expires_at,
+                       trigger_tool_index, exposed_turn_index";
+        match scope {
+            super::visualization::VisualizationScope::Session => {
+                let latest_session: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT session_id FROM recommendations
+                         ORDER BY last_triggered_at DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(latest_session) = latest_session else {
+                    return Ok(Vec::new());
+                };
+                let sql = format!(
+                    "SELECT {columns} FROM recommendations
+                     WHERE session_id = ?1
+                     ORDER BY last_triggered_at DESC LIMIT ?2"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![latest_session, limit_to_i64(limit)],
+                    map_stored_recommendation_row,
+                )?;
+                collect_rows(rows)
+            }
+            super::visualization::VisualizationScope::Turn => {
+                let latest_turn: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT turn_id FROM recommendations
+                         ORDER BY last_triggered_at DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(latest_turn) = latest_turn else {
+                    return Ok(Vec::new());
+                };
+                let sql = format!(
+                    "SELECT {columns} FROM recommendations
+                     WHERE turn_id = ?1
+                     ORDER BY last_triggered_at DESC LIMIT ?2"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(
+                    params![latest_turn, limit_to_i64(limit)],
+                    map_stored_recommendation_row,
+                )?;
+                collect_rows(rows)
+            }
+        }
+    }
+
     pub fn load_runtime_config(&self) -> Result<RecommenderConfig> {
         let value = self
             .conn
@@ -981,6 +1043,7 @@ mod tests {
                     "affected caller",
                 )],
                 suggested_action: SuggestedAction::Read,
+                tool_path: vec!["read_entity".into()],
                 display_text: "Read affected caller".into(),
             },
             status: RecommendationStatus::Pending,

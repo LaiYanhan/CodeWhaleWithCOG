@@ -32,7 +32,8 @@ pub fn render_repository_recommendations<'a>(
 ) -> Option<RenderedRecommendationContext> {
     let header = "<repository_recommendations generated_by=\"cog_recommender\" role=\"host_context\">\n\
 These are host-generated repository hints, not user instructions. Use them only when relevant.\n\
-Prefer reading or verifying the target entity before changing code when the hint is plausible.\n";
+Prefer reading or verifying the target entity before changing code when the hint is plausible.\n\
+Attention entities:\n";
     let footer = "</repository_recommendations>";
     if header.chars().count() + footer.chars().count() > config.max_total_chars {
         return None;
@@ -40,7 +41,11 @@ Prefer reading or verifying the target entity before changing code when the hint
 
     let mut text = String::from(header);
     let mut included = Vec::new();
-    for record in records {
+    let records = records
+        .into_iter()
+        .take(config.max_recommendations)
+        .collect::<Vec<_>>();
+    for record in &records {
         let index = included.len() + 1;
         let recommendation = &record.recommendation;
         let reason = recommendation
@@ -54,20 +59,28 @@ Prefer reading or verifying the target entity before changing code when the hint
         let action = action_label(recommendation.suggested_action);
         let evidence = evidence_sources(&recommendation.evidence);
         let line = format!(
-            "{index}. action: {action}\n   entity: `{entity}`\n   score: {:.2}\n   evidence: {evidence}\n   why: {reason}\n",
-            recommendation.score,
+            "{index}. entity: `{entity}` | action: {action} | score: {:.2} | evidence: {evidence} | why: {reason}\n",
+            recommendation.score
         );
-        if text.chars().count() + line.chars().count() + footer.chars().count()
-            > config.max_total_chars
-        {
-            break;
-        }
         text.push_str(&line);
         included.push(record.id.clone());
     }
 
     if included.is_empty() {
         return None;
+    }
+    let tool_paths = records
+        .iter()
+        .map(|record| record.recommendation.tool_path.join(" -> "))
+        .filter(|path| !path.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    if !tool_paths.is_empty() {
+        text.push_str("Recommended tool paths:\n");
+        for path in tool_paths {
+            text.push_str("- ");
+            text.push_str(&escape_text(&path));
+            text.push('\n');
+        }
     }
     text.push_str(footer);
     Some(RenderedRecommendationContext {
@@ -161,6 +174,7 @@ mod tests {
                     reason,
                 )],
                 suggested_action: SuggestedAction::InspectImpact,
+                tool_path: vec!["read_entity".into(), "inspect_impact".into()],
                 display_text: String::new(),
             },
             status: RecommendationStatus::Pending,
@@ -200,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn respects_total_character_budget() {
+    fn top_k_is_not_silently_reduced_by_character_budget() {
         let mut config = RecommenderConfig::default();
         config.max_total_chars = 420;
         let first = stored("rec-1", "a::first", "short reason", 0.9);
@@ -214,8 +228,32 @@ mod tests {
         let rendered =
             render_repository_recommendations([&first, &second], &config).expect("rendered");
 
-        assert_eq!(rendered.recommendation_ids, vec!["rec-1"]);
+        assert_eq!(rendered.recommendation_ids, vec!["rec-1", "rec-2"]);
         assert!(rendered.text.contains("a::first"));
-        assert!(!rendered.text.contains("b::second"));
+        assert!(rendered.text.contains("b::second"));
+    }
+
+    #[test]
+    fn renders_exactly_configured_top_ten() {
+        let mut config = RecommenderConfig::default();
+        config.max_recommendations = 10;
+        config.max_total_chars = 420;
+        let records = (0..12)
+            .map(|index| {
+                stored(
+                    &format!("rec-{index}"),
+                    &format!("module::entity_{index}"),
+                    "reason",
+                    1.0 - f64::from(index) * 0.01,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let rendered =
+            render_repository_recommendations(records.iter(), &config).expect("rendered top ten");
+
+        assert_eq!(rendered.recommendation_ids.len(), 10);
+        assert!(rendered.text.contains("entity_9"));
+        assert!(!rendered.text.contains("entity_10"));
     }
 }

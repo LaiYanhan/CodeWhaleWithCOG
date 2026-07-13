@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -69,6 +69,7 @@ struct TrajectoryRecord {
     raw_event_id: String,
     turn_id: String,
     session_id: String,
+    ts: String,
     kind: String,
     entity_id: Option<String>,
     entity_name: Option<String>,
@@ -155,24 +156,19 @@ impl VisualizationStore {
             .collect::<Vec<_>>();
         let mut entities = entities;
         add_deleted_change_entities(&mut entities, &entity_changes);
-        let modified_entities = modified_entities_for_scope(
+        let states = entity_states_for_scope(
             scope,
             latest_turn.as_deref(),
             latest_session.as_deref(),
             &trajectory_events,
-            &entities,
-        );
-        let added_entities = changed_entities(&entity_changes, &entities, EntityChangeKind::Added);
-        let deleted_entities =
-            changed_entities(&entity_changes, &entities, EntityChangeKind::Deleted);
-        let impacted_entities = impacted_entities(
-            &modified_entities,
-            &added_entities,
-            &deleted_entities,
-            &relations,
             &entity_changes,
+            &relations,
             &entities,
         );
+        let modified_entities = state_ids(&states, EntityNodeState::Modified);
+        let added_entities = state_ids(&states, EntityNodeState::Added);
+        let deleted_entities = state_ids(&states, EntityNodeState::Deleted);
+        let impacted_entities = state_ids(&states, EntityNodeState::Impacted);
         let tool_chain = tool_chain_for_scope(
             scope,
             latest_turn.as_deref(),
@@ -211,8 +207,22 @@ impl VisualizationStore {
         if !path.exists() {
             anyhow::bail!("{} does not exist", path.display());
         }
-        let conn = Connection::open(&path)
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("failed to open {}", path.display()))?;
+        let initialized = ["entities", "entity_relations"].iter().all(|table| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+        });
+        if !initialized {
+            anyhow::bail!(
+                "{} is not initialized; restart CodeWhale to run cog sync --init",
+                path.display()
+            );
+        }
         let mut entity_stmt =
             conn.prepare("SELECT id, qualified_name, kind FROM entities ORDER BY qualified_name")?;
         let entities = entity_stmt
@@ -286,7 +296,7 @@ impl VisualizationStore {
         let conn = Connection::open(&path)
             .with_context(|| format!("failed to open {}", path.display()))?;
         let mut stmt = conn.prepare(
-            "SELECT te.raw_event_id, re.turn_id, re.session_id, te.kind, te.entity_id,
+            "SELECT te.raw_event_id, re.turn_id, re.session_id, re.ts, te.kind, te.entity_id,
                     te.entity_json, te.file_path, te.payload_json, re.input_json, re.output_summary
              FROM trajectory_events te
              JOIN tool_events re ON re.id = te.raw_event_id
@@ -312,9 +322,9 @@ impl VisualizationStore {
 }
 
 fn map_trajectory_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrajectoryRecord> {
-    let entity_json: Option<String> = row.get(5)?;
-    let payload_json: String = row.get(7)?;
-    let raw_input_json: String = row.get(8)?;
+    let entity_json: Option<String> = row.get(6)?;
+    let payload_json: String = row.get(8)?;
+    let raw_input_json: String = row.get(9)?;
     let entity_value = entity_json
         .as_deref()
         .and_then(|value| serde_json::from_str::<Value>(value).ok())
@@ -333,14 +343,143 @@ fn map_trajectory_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trajectory
         raw_event_id: row.get(0)?,
         turn_id: row.get(1)?,
         session_id: row.get(2)?,
-        kind: row.get(3)?,
-        entity_id: row.get::<_, Option<String>>(4)?.or(entity_id_from_json),
+        ts: row.get(3)?,
+        kind: row.get(4)?,
+        entity_id: row.get::<_, Option<String>>(5)?.or(entity_id_from_json),
         entity_name,
-        file_path: row.get(6)?,
+        file_path: row.get(7)?,
         payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
         raw_input: serde_json::from_str(&raw_input_json).unwrap_or(Value::Null),
-        raw_output: row.get(9)?,
+        raw_output: row.get(10)?,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntityNodeState {
+    Modified,
+    Added,
+    Deleted,
+    Impacted,
+}
+
+#[derive(Debug)]
+struct EntityStateTransition {
+    ts: String,
+    sequence: u8,
+    state: EntityNodeState,
+    sources: Vec<String>,
+    impacted: Vec<String>,
+}
+
+fn entity_states_for_scope(
+    scope: VisualizationScope,
+    latest_turn: Option<&str>,
+    latest_session: Option<&str>,
+    trajectory_events: &[TrajectoryRecord],
+    entity_changes: &[EntityChange],
+    relations: &[VisualizationRelation],
+    entities: &[VisualizationEntity],
+) -> HashMap<String, EntityNodeState> {
+    let mut transitions = Vec::new();
+    for event in trajectory_events {
+        if event.kind != "edit_entity" || !event_in_scope(scope, latest_turn, latest_session, event)
+        {
+            continue;
+        }
+        let sources = resolve_event_entity_ids(event, entities);
+        if sources.is_empty() {
+            continue;
+        }
+        transitions.push(EntityStateTransition {
+            ts: event.ts.clone(),
+            sequence: 0,
+            state: EntityNodeState::Modified,
+            impacted: impacted_from_sources(&sources, relations),
+            sources,
+        });
+    }
+    for change in entity_changes {
+        let source = match change.kind {
+            EntityChangeKind::Added => current_entity_id(&change.entity, entities),
+            EntityChangeKind::Deleted => Some(deleted_entity_id(&change.entity.qualified_name)),
+        };
+        let Some(source) = source else {
+            continue;
+        };
+        let impacted = change
+            .impacted_entities
+            .iter()
+            .filter_map(|entity| current_entity_id(entity, entities))
+            .collect::<Vec<_>>();
+        transitions.push(EntityStateTransition {
+            ts: change.ts.to_rfc3339(),
+            sequence: 1,
+            state: match change.kind {
+                EntityChangeKind::Added => EntityNodeState::Added,
+                EntityChangeKind::Deleted => EntityNodeState::Deleted,
+            },
+            sources: vec![source],
+            impacted,
+        });
+    }
+    transitions.sort_by(|left, right| {
+        left.ts
+            .cmp(&right.ts)
+            .then_with(|| left.sequence.cmp(&right.sequence))
+    });
+
+    let mut states = HashMap::new();
+    for transition in transitions {
+        let source_set = transition.sources.iter().cloned().collect::<HashSet<_>>();
+        for id in transition.impacted {
+            if !source_set.contains(&id) {
+                states.insert(id, EntityNodeState::Impacted);
+            }
+        }
+        for id in transition.sources {
+            states.insert(id, transition.state);
+        }
+    }
+    states
+}
+
+fn state_ids(states: &HashMap<String, EntityNodeState>, expected: EntityNodeState) -> Vec<String> {
+    sorted_ids(
+        states
+            .iter()
+            .filter(|(_, state)| **state == expected)
+            .map(|(id, _)| id.clone())
+            .collect(),
+    )
+}
+
+fn impacted_from_sources(sources: &[String], relations: &[VisualizationRelation]) -> Vec<String> {
+    let mut reverse_dependencies: HashMap<String, Vec<String>> = HashMap::new();
+    for relation in relations {
+        if matches!(relation.kind.as_str(), "calls" | "uses") {
+            reverse_dependencies
+                .entry(relation.target.clone())
+                .or_default()
+                .push(relation.source.clone());
+        }
+    }
+    let source_set = sources.iter().cloned().collect::<HashSet<_>>();
+    let mut impacted = HashSet::new();
+    let mut queue = VecDeque::from(sources.to_vec());
+    while let Some(entity_id) = queue.pop_front() {
+        if let Some(dependents) = reverse_dependencies.get(&entity_id) {
+            for dependent in dependents {
+                if impacted.insert(dependent.clone()) {
+                    queue.push_back(dependent.clone());
+                }
+            }
+        }
+        if impacted.len() > 500 {
+            break;
+        }
+    }
+    impacted.retain(|id| !source_set.contains(id));
+    sorted_ids(impacted)
 }
 
 fn modified_entities_for_scope(
@@ -877,6 +1016,7 @@ mod tests {
         );
 
         assert_eq!(graph.added_entities, vec!["new"]);
+        assert!(!graph.modified_entities.contains(&"new".to_string()));
         assert_eq!(graph.deleted_entities, vec!["deleted:old_feature"]);
         assert!(
             graph
@@ -885,6 +1025,101 @@ mod tests {
                 .any(|entity| entity.id == "deleted:old_feature")
         );
         assert!(graph.impacted_entities.contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn entity_state_timeline_preserves_untouched_additions_and_tracks_later_changes() {
+        let entities = vec![
+            VisualizationEntity {
+                id: "caller".into(),
+                name: "app::caller".into(),
+                display_name: "caller".into(),
+                kind: "function".into(),
+                file_path: None,
+            },
+            VisualizationEntity {
+                id: "old".into(),
+                name: "app::old".into(),
+                display_name: "old".into(),
+                kind: "function".into(),
+                file_path: None,
+            },
+            VisualizationEntity {
+                id: "new".into(),
+                name: "app::new".into(),
+                display_name: "new".into(),
+                kind: "function".into(),
+                file_path: None,
+            },
+        ];
+        let edit = TrajectoryRecord {
+            raw_event_id: "edit".into(),
+            turn_id: "turn".into(),
+            session_id: "session".into(),
+            ts: "2026-07-12T00:00:02Z".into(),
+            kind: "edit_entity".into(),
+            entity_id: Some("old".into()),
+            entity_name: Some("app::old".into()),
+            file_path: None,
+            payload: Value::Null,
+            raw_input: Value::Null,
+            raw_output: String::new(),
+        };
+        let changes = vec![
+            EntityChange {
+                id: "added".into(),
+                session_id: "session".into(),
+                turn_id: "turn".into(),
+                raw_event_id: "create".into(),
+                ts: chrono::DateTime::parse_from_rfc3339("2026-07-12T00:00:01Z")
+                    .expect("timestamp")
+                    .with_timezone(&Utc),
+                kind: EntityChangeKind::Added,
+                entity: EntityRef {
+                    cog_entity_id: Some("new".into()),
+                    qualified_name: "app::new".into(),
+                    kind: EntityKind::Function,
+                    file_path: None,
+                    confidence: 0.9,
+                },
+                impacted_entities: Vec::new(),
+            },
+            EntityChange {
+                id: "deleted".into(),
+                session_id: "session".into(),
+                turn_id: "turn".into(),
+                raw_event_id: "delete".into(),
+                ts: chrono::DateTime::parse_from_rfc3339("2026-07-12T00:00:03Z")
+                    .expect("timestamp")
+                    .with_timezone(&Utc),
+                kind: EntityChangeKind::Deleted,
+                entity: EntityRef::new("app::old"),
+                impacted_entities: Vec::new(),
+            },
+        ];
+        let relations = vec![VisualizationRelation {
+            id: "calls".into(),
+            source: "caller".into(),
+            target: "old".into(),
+            kind: "calls".into(),
+        }];
+
+        let states = entity_states_for_scope(
+            VisualizationScope::Turn,
+            Some("turn"),
+            Some("session"),
+            &[edit],
+            &changes,
+            &relations,
+            &entities,
+        );
+
+        assert_eq!(states.get("new"), Some(&EntityNodeState::Added));
+        assert_eq!(states.get("caller"), Some(&EntityNodeState::Impacted));
+        assert_eq!(
+            states.get("deleted:app::old"),
+            Some(&EntityNodeState::Deleted)
+        );
     }
 
     #[test]
@@ -909,6 +1144,7 @@ mod tests {
             raw_event_id: "raw".into(),
             turn_id: "turn".into(),
             session_id: "session".into(),
+            ts: "2026-07-12T00:00:00Z".into(),
             kind: "edit_entity".into(),
             entity_id: None,
             entity_name: None,
@@ -955,6 +1191,7 @@ mod tests {
             raw_event_id: "raw".into(),
             turn_id: "turn".into(),
             session_id: "session".into(),
+            ts: "2026-07-12T00:00:00Z".into(),
             kind: "edit_entity".into(),
             entity_id: None,
             entity_name: None,

@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::RecommendationAlgorithm;
 use crate::cog_recommender::recommendation_context::{RecommendationContext, entity_key};
 use crate::cog_recommender::types::{
-    Candidate, EntityRef, Evidence, EvidenceSource, Recommendation, SuggestedAction, TrajectoryKind,
+    Candidate, EntityKind, EntityRef, Evidence, EvidenceSource, Recommendation, SuggestedAction,
+    TrajectoryKind,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -20,10 +21,28 @@ impl RecommendationAlgorithm for WeightedV1Algorithm {
             .into_iter()
             .filter_map(|candidate| to_recommendation(context, candidate))
             .collect::<Vec<_>>();
+        recommendations = suppress_parent_modules(recommendations);
         recommendations.sort_by(compare_recommendations);
-        recommendations.truncate(context.config.max_recommendations);
         recommendations
     }
+}
+
+fn suppress_parent_modules(recommendations: Vec<Recommendation>) -> Vec<Recommendation> {
+    let concrete_names = recommendations
+        .iter()
+        .filter(|recommendation| recommendation.entity.kind != EntityKind::Module)
+        .map(|recommendation| recommendation.entity.qualified_name.clone())
+        .collect::<HashSet<_>>();
+
+    recommendations
+        .into_iter()
+        .filter(|recommendation| {
+            recommendation.entity.kind != EntityKind::Module
+                || !concrete_names.iter().any(|name| {
+                    name.starts_with(&format!("{}::", recommendation.entity.qualified_name))
+                })
+        })
+        .collect()
 }
 
 fn merge_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
@@ -93,14 +112,42 @@ fn to_recommendation(
     }
 
     let suggested_action = suggested_action(context, &candidate.evidence);
+    let tool_path = recommended_tool_path(context, suggested_action);
     let display_text = format_display(suggested_action, &candidate.entity, &candidate.evidence);
     Some(Recommendation {
         entity: candidate.entity,
         score,
         evidence: candidate.evidence,
         suggested_action,
+        tool_path,
         display_text,
     })
+}
+
+fn recommended_tool_path(context: &RecommendationContext, action: SuggestedAction) -> Vec<String> {
+    let mut path = match context.trigger.kind {
+        TrajectoryKind::ErrorSignal => vec!["inspect_error", "read_entity"],
+        TrajectoryKind::SearchEntity => vec!["read_entity"],
+        TrajectoryKind::EditEntity => vec!["inspect_impact", "read_entity"],
+        TrajectoryKind::TestEntity => vec!["read_failure", "read_entity"],
+        _ => vec!["read_entity"],
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+
+    let final_step = match action {
+        SuggestedAction::Read => None,
+        SuggestedAction::InspectImpact => Some("inspect_impact"),
+        SuggestedAction::RunTest | SuggestedAction::Verify => Some("run_test"),
+        SuggestedAction::UpdateRelatedCode => Some("edit_entity"),
+    };
+    if let Some(step) = final_step
+        && !path.iter().any(|existing| existing == step)
+    {
+        path.push(step.to_string());
+    }
+    path
 }
 
 fn score_candidate(context: &RecommendationContext, candidate: &Candidate) -> f64 {
@@ -421,6 +468,47 @@ mod tests {
         );
 
         assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn suppresses_module_when_a_nested_entity_is_recommendable() {
+        let module = EntityRef::new("game")
+            .with_kind(EntityKind::Module)
+            .with_confidence(0.9);
+        let method = EntityRef::new("game::Board::reveal_cell")
+            .with_kind(EntityKind::Method)
+            .with_confidence(0.9);
+
+        let ranked = algorithm().recommend(
+            &context(TrajectoryKind::EditEntity, Some(entity("current", 0.8))),
+            vec![
+                candidate(&module, EvidenceSource::CogImpact, 1.0, "module impact"),
+                candidate(&method, EvidenceSource::CogImpact, 0.6, "method impact"),
+            ],
+        );
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].entity.qualified_name, "game::Board::reveal_cell");
+    }
+
+    #[test]
+    fn keeps_module_as_fallback_without_nested_entity() {
+        let module = EntityRef::new("game")
+            .with_kind(EntityKind::Module)
+            .with_confidence(0.9);
+
+        let ranked = algorithm().recommend(
+            &context(TrajectoryKind::EditEntity, Some(entity("current", 0.8))),
+            vec![candidate(
+                &module,
+                EvidenceSource::CogImpact,
+                1.0,
+                "module impact",
+            )],
+        );
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].entity.qualified_name, "game");
     }
 
     fn algorithm() -> WeightedV1Algorithm {

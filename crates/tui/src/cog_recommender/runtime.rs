@@ -3,7 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -32,7 +32,6 @@ const FEEDBACK_MINUTES: i64 = 15;
 #[derive(Debug, Default)]
 pub struct PendingRecommendationQueue {
     records: Vec<StoredRecommendation>,
-    injections_by_turn: HashMap<(String, String), usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,10 +58,7 @@ impl PendingRecommendationQueue {
                     && record.recommendation.entity.qualified_name
                         == recommendation.entity.qualified_name
                     && record.recommendation.suggested_action == recommendation.suggested_action
-                    && matches!(
-                        record.status,
-                        RecommendationStatus::Pending | RecommendationStatus::Exposed
-                    )
+                    && record.status == RecommendationStatus::Pending
             });
             let record = if let Some(record) = existing {
                 if !record
@@ -72,8 +68,7 @@ impl PendingRecommendationQueue {
                 {
                     record.trigger_event_ids.push(trigger_event_id.to_string());
                 }
-                record.recommendation.score = record.recommendation.score.max(recommendation.score);
-                merge_evidence(&mut record.recommendation.evidence, recommendation.evidence);
+                record.recommendation = recommendation;
                 record.last_triggered_at = now;
                 record.expires_at = now + Duration::minutes(FEEDBACK_MINUTES);
                 record
@@ -112,17 +107,6 @@ impl PendingRecommendationQueue {
             return None;
         }
         self.expire(session_id, turn_index, tool_index, repository);
-        let injection_key = (session_id.to_string(), turn_id.to_string());
-        if self
-            .injections_by_turn
-            .get(&injection_key)
-            .copied()
-            .unwrap_or(0)
-            >= config.max_injections_per_turn
-        {
-            return None;
-        }
-
         let mut selected = self
             .records
             .iter_mut()
@@ -156,7 +140,6 @@ impl PendingRecommendationQueue {
             record.exposed_turn_index = Some(turn_index);
             persist(repository, record);
         }
-        *self.injections_by_turn.entry(injection_key).or_insert(0) += 1;
         for recommendation_id in exposed_ids {
             record_feedback(
                 repository,
@@ -291,6 +274,7 @@ pub struct RuntimeRecommendationLoop {
     config: RecommenderConfig,
     tool_index: u64,
     turns: HashMap<String, u64>,
+    pre_tool_cog_snapshots: HashMap<String, CogSnapshot>,
     workspace: PathBuf,
 }
 
@@ -302,9 +286,11 @@ impl RuntimeRecommendationLoop {
             .as_ref()
             .and_then(|repo| repo.load_runtime_config().ok())
             .unwrap_or_default();
+        let adapter = CliCogAdapter::new(workspace);
+        let _ = adapter.ensure_synced(workspace);
         Self {
             collector: RawEventCollector::open_at_workspace(workspace).unwrap_or_default(),
-            adapter: CliCogAdapter::new(workspace),
+            adapter,
             recommender: Recommender::new(config.clone()),
             repository,
             queue: PendingRecommendationQueue::default(),
@@ -315,7 +301,31 @@ impl RuntimeRecommendationLoop {
             config,
             tool_index: 0,
             turns: HashMap::new(),
+            pre_tool_cog_snapshots: HashMap::new(),
             workspace: workspace.to_path_buf(),
+        }
+    }
+
+    pub fn record_tool_started(
+        &mut self,
+        tool_call_id: &str,
+        session_id: &str,
+        turn_id: &str,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) {
+        self.collector.record_tool_call_started(
+            tool_call_id,
+            session_id,
+            turn_id,
+            tool_name,
+            input,
+        );
+        if tool_may_change_code(tool_name)
+            && let Some(snapshot) = load_cog_snapshot(&self.workspace)
+        {
+            self.pre_tool_cog_snapshots
+                .insert(tool_call_id.to_string(), snapshot);
         }
     }
 
@@ -332,13 +342,9 @@ impl RuntimeRecommendationLoop {
         self.reload_config();
         self.tool_index = self.tool_index.saturating_add(1);
         let turn_index = self.turn_index(turn_id);
-        self.collector.record_tool_call_started(
-            tool_call_id,
-            session_id,
-            turn_id,
-            tool_name,
-            input,
-        );
+        if !self.pre_tool_cog_snapshots.contains_key(tool_call_id) {
+            self.record_tool_started(tool_call_id, session_id, turn_id, tool_name, input);
+        }
         let raw = self.collector.record_tool_call_completed(
             tool_call_id,
             session_id,
@@ -357,7 +363,7 @@ impl RuntimeRecommendationLoop {
         for event in events {
             let mut change_recommendations = Vec::new();
             if event.kind == TrajectoryKind::EditEntity && status == ToolEventStatus::Success {
-                let before_sync = load_cog_snapshot(&self.workspace);
+                let before_sync = self.pre_tool_cog_snapshots.remove(tool_call_id);
                 let _ = self.adapter.ensure_synced(&self.workspace);
                 let after_sync = load_cog_snapshot(&self.workspace);
                 change_recommendations = self.record_entity_changes(
@@ -534,6 +540,7 @@ impl RuntimeRecommendationLoop {
                     })
                     .collect(),
                 suggested_action: record.suggested_action,
+                tool_path: record.tool_path,
                 display_text: format!("Review {}", record.entity.qualified_name),
             })
             .collect()
@@ -620,6 +627,13 @@ fn merge_evidence(existing: &mut Vec<Evidence>, incoming: Vec<Evidence>) {
         *count += 1;
         *count <= 3
     });
+}
+
+fn tool_may_change_code(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "apply_patch" | "edit_file" | "write_file" | "delete_file" | "move_file" | "rename_file"
+    )
 }
 
 fn dedupe_recommendations(recommendations: Vec<Recommendation>) -> Vec<Recommendation> {
@@ -714,7 +728,7 @@ struct CogSnapshot {
 
 fn load_cog_snapshot(workspace: &Path) -> Option<CogSnapshot> {
     let path = workspace.join(".cog").join("cog.db");
-    let conn = Connection::open(path).ok()?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     let mut entity_stmt = conn
         .prepare("SELECT id, qualified_name, kind FROM entities ORDER BY qualified_name")
         .ok()?;
@@ -788,6 +802,19 @@ fn change_recommendation(
         score,
         evidence: vec![evidence],
         suggested_action: SuggestedAction::UpdateRelatedCode,
+        tool_path: if source == EvidenceSource::EntityDeleted {
+            vec![
+                "inspect_impact".into(),
+                "search_references".into(),
+                "run_test".into(),
+            ]
+        } else {
+            vec![
+                "inspect_impact".into(),
+                "read_entity".into(),
+                "run_test".into(),
+            ]
+        },
         display_text: format!(
             "Verify {} after structural graph change",
             target.qualified_name
@@ -832,12 +859,22 @@ mod tests {
                 "historical co-access",
             )],
             suggested_action: SuggestedAction::Read,
+            tool_path: vec!["read_entity".into()],
             display_text: format!("Read {name}"),
         }
     }
 
     #[test]
-    fn queue_merges_and_injects_once_per_turn() {
+    fn loading_missing_cog_snapshot_does_not_create_empty_database() {
+        let workspace = tempdir().expect("workspace");
+        let cog_db = workspace.path().join(".cog").join("cog.db");
+
+        assert!(load_cog_snapshot(workspace.path()).is_none());
+        assert!(!cog_db.exists());
+    }
+
+    #[test]
+    fn queue_merges_and_injects_each_new_pending_batch() {
         let mut queue = PendingRecommendationQueue::default();
         queue.enqueue(
             "s",
@@ -875,6 +912,74 @@ mod tests {
                 .render_for_next_request("s", "t", 0, 2, &config, None)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn queue_allows_a_second_injection_after_a_later_edit_in_same_turn() {
+        let mut queue = PendingRecommendationQueue::default();
+        let config = RecommenderConfig::default();
+        queue.enqueue(
+            "s",
+            "t",
+            0,
+            1,
+            "e1",
+            vec![recommendation("a::one", 0.8)],
+            None,
+        );
+        queue
+            .render_for_next_request("s", "t", 0, 1, &config, None)
+            .expect("first context");
+
+        queue.enqueue(
+            "s",
+            "t",
+            0,
+            2,
+            "e2",
+            vec![recommendation("a::two", 0.8)],
+            None,
+        );
+        let second = queue
+            .render_for_next_request("s", "t", 0, 2, &config, None)
+            .expect("second context");
+
+        assert!(second.text.contains("a::two"));
+        assert!(!second.text.contains("a::one"));
+    }
+
+    #[test]
+    fn queue_requeues_same_entity_after_its_prior_batch_was_exposed() {
+        let mut queue = PendingRecommendationQueue::default();
+        let config = RecommenderConfig::default();
+        queue.enqueue(
+            "s",
+            "t",
+            0,
+            1,
+            "e1",
+            vec![recommendation("a::same", 0.8)],
+            None,
+        );
+        queue
+            .render_for_next_request("s", "t", 0, 1, &config, None)
+            .expect("first context");
+
+        queue.enqueue(
+            "s",
+            "t",
+            0,
+            2,
+            "e2",
+            vec![recommendation("a::same", 0.9)],
+            None,
+        );
+        let second = queue
+            .render_for_next_request("s", "t", 0, 2, &config, None)
+            .expect("second context");
+
+        assert_eq!(queue.records().len(), 2);
+        assert!(second.text.contains("a::same"));
     }
 
     #[test]
@@ -989,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_exposes_only_records_that_fit_render_budget() {
+    fn queue_exposes_configured_top_k_even_with_small_render_budget() {
         let mut queue = PendingRecommendationQueue::default();
         queue.enqueue(
             "s",
@@ -1021,9 +1126,9 @@ mod tests {
             .text;
 
         assert!(text.contains("short::target"));
-        assert!(!text.contains("very::long::target"));
+        assert!(text.contains("very::long::target"));
         assert_eq!(queue.records()[0].status, RecommendationStatus::Exposed);
-        assert_eq!(queue.records()[1].status, RecommendationStatus::Pending);
+        assert_eq!(queue.records()[1].status, RecommendationStatus::Exposed);
     }
 
     #[test]
@@ -1101,5 +1206,66 @@ mod tests {
         );
 
         assert_eq!(repo.count_rows("recommendations").unwrap(), 1);
+    }
+
+    #[test]
+    fn runtime_diffs_cog_snapshot_captured_before_edit_tool_executes() {
+        let workspace = tempdir().expect("workspace");
+        let cog_dir = workspace.path().join(".cog");
+        std::fs::create_dir_all(&cog_dir).expect("cog dir");
+        let conn = Connection::open(cog_dir.join("cog.db")).expect("cog db");
+        conn.execute_batch(
+            "CREATE TABLE entities (
+                id TEXT PRIMARY KEY,
+                qualified_name TEXT NOT NULL,
+                kind TEXT NOT NULL
+             );
+             CREATE TABLE entity_relations (
+                id TEXT PRIMARY KEY,
+                from_entity TEXT NOT NULL,
+                to_entity TEXT NOT NULL,
+                kind TEXT NOT NULL
+             );
+             INSERT INTO entities VALUES ('old', 'old_module', 'module');",
+        )
+        .expect("cog schema");
+
+        let mut runtime = RuntimeRecommendationLoop::open(workspace.path());
+        runtime.record_tool_started(
+            "tool-edit",
+            "session",
+            "turn",
+            "write_file",
+            json!({"path": "new_module.py"}),
+        );
+        conn.execute("DELETE FROM entities WHERE id = 'old'", [])
+            .expect("delete old entity");
+        conn.execute(
+            "INSERT INTO entities (id, qualified_name, kind)
+             VALUES ('new', 'new_module', 'module')",
+            [],
+        )
+        .expect("insert new entity");
+        let before = runtime
+            .pre_tool_cog_snapshots
+            .remove("tool-edit")
+            .expect("pre-tool snapshot");
+        let after = load_cog_snapshot(workspace.path()).expect("post-tool snapshot");
+        runtime.record_entity_changes("session", "turn", "raw-edit", Some(&before), Some(&after));
+
+        let repo = SqliteTrajectoryRepository::open(&cog_dir.join(DEFAULT_RECOMMENDER_DB_NAME))
+            .expect("repo");
+        let changes = repo
+            .list_recent_entity_changes(
+                crate::cog_recommender::visualization::VisualizationScope::Session,
+                10,
+            )
+            .expect("changes");
+        assert!(changes.iter().any(|change| {
+            change.kind == EntityChangeKind::Added && change.entity.qualified_name == "new_module"
+        }));
+        assert!(changes.iter().any(|change| {
+            change.kind == EntityChangeKind::Deleted && change.entity.qualified_name == "old_module"
+        }));
     }
 }
