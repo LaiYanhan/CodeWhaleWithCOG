@@ -98,6 +98,7 @@ Attention entities:\n";
 
 fn action_label(action: SuggestedAction) -> &'static str {
     match action {
+        SuggestedAction::ConsultCogNext => "consult_cog_next",
         SuggestedAction::Read => "read",
         SuggestedAction::InspectImpact => "inspect_impact",
         SuggestedAction::RunTest => "run_test",

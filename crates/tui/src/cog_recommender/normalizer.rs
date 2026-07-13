@@ -87,6 +87,12 @@ fn is_cog_command(raw: &RawToolEvent) -> bool {
 }
 
 fn is_cog_write(raw: &RawToolEvent) -> bool {
+    if raw.tool_name == "cog" {
+        return matches!(
+            raw.input_summary.get("action").and_then(Value::as_str),
+            Some("assert" | "retract")
+        );
+    }
     let command = command_text(&raw.input_summary);
     ["assert", "depend", "retract"]
         .iter()
@@ -192,5 +198,17 @@ mod tests {
             let events = normalize_tool_event(&raw(tool, json!({"cmd": "python helper.py"})));
             assert!(events.is_empty(), "{tool} must not become read_entity");
         }
+    }
+
+    #[test]
+    fn classifies_native_cog_assert_as_write() {
+        let events = normalize_tool_event(&raw("cog", json!({"action": "assert"})));
+        assert_eq!(events[0].kind, TrajectoryKind::CogWrite);
+    }
+
+    #[test]
+    fn classifies_native_cog_next_as_query() {
+        let events = normalize_tool_event(&raw("cog", json!({"action": "next"})));
+        assert_eq!(events[0].kind, TrajectoryKind::CogQuery);
     }
 }

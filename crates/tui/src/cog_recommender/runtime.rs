@@ -240,6 +240,17 @@ impl PendingRecommendationQueue {
                 {
                     Some(RecommendationFeedbackKind::ValidatedAfterRecommendation)
                 }
+                TrajectoryKind::CogQuery
+                    if record.recommendation.suggested_action
+                        == SuggestedAction::ConsultCogNext
+                        && event
+                            .payload
+                            .get("action")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("next") =>
+                {
+                    Some(RecommendationFeedbackKind::ValidatedAfterRecommendation)
+                }
                 _ => None,
             };
             if let Some(kind) = kind {
@@ -442,6 +453,9 @@ impl RuntimeRecommendationLoop {
                 &self.resolved_graph,
                 self.resolved_recent_events.clone(),
             );
+            if let Some(workflow) = workflow_consultation(&resolved, status) {
+                recommendations.push(workflow);
+            }
             recommendations.extend(change_recommendations);
             recommendations = dedupe_recommendations(recommendations);
             if recommendations.is_empty() && !summary_fallback_used {
@@ -710,6 +724,9 @@ fn dedupe_recommendations(recommendations: Vec<Recommendation>) -> Vec<Recommend
 }
 
 fn recommendation_has_injectable_entity(recommendation: &Recommendation) -> bool {
+    if recommendation.suggested_action == SuggestedAction::ConsultCogNext {
+        return recommendation.entity.qualified_name == "cog::workflow";
+    }
     let name = recommendation.entity.qualified_name.trim();
     matches!(
         recommendation.entity.kind,
@@ -720,6 +737,45 @@ fn recommendation_has_injectable_entity(recommendation: &Recommendation) -> bool
             | EntityKind::Method
     ) && !name.is_empty()
         && !name.starts_with("error:")
+}
+
+/// The recommender observes behavior boundaries, but COG alone owns the workflow
+/// phase. This recommendation asks the Agent to consult `cog next`; it never
+/// participates in entity-graph extraction or rendering.
+fn workflow_consultation(
+    event: &TrajectoryEvent,
+    status: ToolEventStatus,
+) -> Option<Recommendation> {
+    if matches!(
+        event.kind,
+        TrajectoryKind::CogQuery | TrajectoryKind::CogWrite
+    ) {
+        return None;
+    }
+    let reason = match (event.kind, status) {
+        (TrajectoryKind::EditEntity, ToolEventStatus::Success) => {
+            "code changed and COG synchronization completed; ask COG for the reconciliation step"
+        }
+        (TrajectoryKind::ReadEntity | TrajectoryKind::SearchEntity, ToolEventStatus::Success) => {
+            "a new observable work turn needs COG workflow guidance"
+        }
+        (TrajectoryKind::TestEntity, ToolEventStatus::Error) => {
+            "a test failed; ask COG for the next debugging workflow action"
+        }
+        (_, ToolEventStatus::Error) => {
+            "a tool failed; ask COG which workflow action should recover context"
+        }
+        _ => return None,
+    };
+    let entity = EntityRef::new("cog::workflow").with_confidence(1.0);
+    Some(Recommendation {
+        entity: entity.clone(),
+        score: 0.98,
+        evidence: vec![Evidence::new(EvidenceSource::Rule, entity, 1.0, reason)],
+        suggested_action: SuggestedAction::ConsultCogNext,
+        tool_path: vec!["cog(action=next)".into()],
+        display_text: "Consult COG workflow state with cog next".into(),
+    })
 }
 
 fn recommendation_materially_changed(previous: &Recommendation, next: &Recommendation) -> bool {
@@ -1427,5 +1483,51 @@ mod tests {
         assert!(changes.iter().any(|change| {
             change.kind == EntityChangeKind::Deleted && change.entity.qualified_name == "old_module"
         }));
+    }
+
+    #[test]
+    fn workflow_consultation_is_injectable_and_completes_after_cog_next() {
+        let trigger = TrajectoryEvent {
+            id: "edit".into(),
+            raw_event_id: "raw-edit".into(),
+            session_id: "session".into(),
+            kind: TrajectoryKind::EditEntity,
+            entity_ref: Some(EntityRef::new("src::main")),
+            file_path: Some("src/main.rs".into()),
+            line_range: None,
+            payload: json!({"path": "src/main.rs"}),
+            confidence: 1.0,
+        };
+        let recommendation = workflow_consultation(&trigger, ToolEventStatus::Success)
+            .expect("edit should consult COG workflow");
+        assert_eq!(recommendation.entity.qualified_name, "cog::workflow");
+        assert_eq!(recommendation.tool_path, vec!["cog(action=next)"]);
+
+        let mut queue = PendingRecommendationQueue::default();
+        queue.enqueue("session", "turn", 0, 1, "edit", vec![recommendation], None);
+        let context = queue
+            .render_for_next_request("session", "turn", 0, 1, &RecommenderConfig::default(), None)
+            .expect("workflow consultation should be injected");
+        assert!(context.text.contains("action: consult_cog_next"));
+        assert!(context.text.contains("cog(action=next)"));
+
+        queue.observe(
+            &TrajectoryEvent {
+                id: "next".into(),
+                raw_event_id: "raw-next".into(),
+                session_id: "session".into(),
+                kind: TrajectoryKind::CogQuery,
+                entity_ref: None,
+                file_path: None,
+                line_range: None,
+                payload: json!({"action": "next"}),
+                confidence: 1.0,
+            },
+            "turn",
+            0,
+            2,
+            None,
+        );
+        assert_eq!(queue.records()[0].status, RecommendationStatus::Completed);
     }
 }

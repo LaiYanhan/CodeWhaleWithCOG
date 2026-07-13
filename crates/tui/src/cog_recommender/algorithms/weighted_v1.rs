@@ -137,6 +137,7 @@ fn recommended_tool_path(context: &RecommendationContext, action: SuggestedActio
     .collect::<Vec<_>>();
 
     let final_step = match action {
+        SuggestedAction::ConsultCogNext => Some("cog(action=next)"),
         SuggestedAction::Read => None,
         SuggestedAction::InspectImpact => Some("inspect_impact"),
         SuggestedAction::RunTest | SuggestedAction::Verify => Some("run_test"),
@@ -312,6 +313,7 @@ fn display_reasons(evidence: &[Evidence]) -> Vec<String> {
 
 fn action_text(action: SuggestedAction) -> &'static str {
     match action {
+        SuggestedAction::ConsultCogNext => "consult COG workflow for",
         SuggestedAction::Read => "read",
         SuggestedAction::InspectImpact => "inspect impact of",
         SuggestedAction::RunTest => "run tests for",

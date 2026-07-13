@@ -395,11 +395,16 @@ fn records_from_stored_recommendations(
             )| {
                 let evidence = compact_summary_evidence(evidence);
                 let score_parts = score_parts(&entity, &evidence);
+                let server_score = if suggested_action == SuggestedAction::ConsultCogNext {
+                    0.98
+                } else {
+                    score_from_parts(score_parts, weights)
+                };
                 RecommendationSummaryRecord {
                     entity,
                     suggested_action,
                     tool_path: summary_tool_path(suggested_action, &evidence),
-                    server_score: score_from_parts(score_parts, weights),
+                    server_score,
                     score_parts,
                     evidence,
                     occurrence_count,
@@ -454,6 +459,7 @@ fn summary_tool_path(
     .map(str::to_string)
     .collect::<Vec<_>>();
     let tail = match action {
+        SuggestedAction::ConsultCogNext => return vec!["cog(action=next)".into()],
         SuggestedAction::Read => None,
         SuggestedAction::InspectImpact => Some("inspect_impact"),
         SuggestedAction::RunTest | SuggestedAction::Verify => Some("run_test"),
@@ -575,6 +581,9 @@ fn projected_reason(edge: &EdgeStats, target: &EntityRef) -> String {
 }
 
 fn is_recommendable_entity(entity: &EntityRef) -> bool {
+    if entity.qualified_name == "cog::workflow" {
+        return true;
+    }
     matches!(
         entity.kind,
         EntityKind::File

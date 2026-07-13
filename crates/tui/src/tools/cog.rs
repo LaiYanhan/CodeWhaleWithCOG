@@ -27,7 +27,7 @@ impl ToolSpec for CogTool {
         json!({
             "type": "object",
             "properties": {
-                "action": {"type":"string", "enum":["query","impact","sync","assert","retract"]},
+                "action": {"type":"string", "enum":["next","query","impact","sync","assert","retract"]},
                 "entity": {"type":"string", "description":"COG qualified entity name for query, impact, or assert."},
                 "relations": {"type":"boolean", "description":"For query, include relations."},
                 "kind": {"type":"string", "description":"Assertion kind for assert (for example invariant or correction)."},
@@ -50,7 +50,7 @@ impl ToolSpec for CogTool {
 
     fn approval_requirement_for(&self, input: &Value) -> ApprovalRequirement {
         match input.get("action").and_then(Value::as_str) {
-            Some("query" | "impact") => ApprovalRequirement::Auto,
+            Some("next" | "query" | "impact") => ApprovalRequirement::Auto,
             _ => ApprovalRequirement::Suggest,
         }
     }
@@ -58,7 +58,7 @@ impl ToolSpec for CogTool {
     fn is_read_only_for(&self, input: &Value) -> bool {
         matches!(
             input.get("action").and_then(Value::as_str),
-            Some("query" | "impact")
+            Some("next" | "query" | "impact")
         )
     }
 
@@ -69,6 +69,7 @@ impl ToolSpec for CogTool {
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let action = required(input.get("action"), "action")?;
         let args = match action {
+            "next" => vec!["next".into()],
             "query" => {
                 let entity = required(input.get("entity"), "entity")?;
                 let mut args = vec!["query".to_string(), entity.to_string()];
