@@ -164,8 +164,6 @@ pub struct Candidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuggestedAction {
-    /// Ask COG's workflow state machine for the next cognitive action.
-    ConsultCogNext,
     Read,
     InspectImpact,
     RunTest,

@@ -41,6 +41,23 @@ pub struct RuntimeRecommendationContext {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowCheckpointTrigger {
+    TaskStart,
+    PostEdit,
+    ToolFailure,
+}
+
+impl WorkflowCheckpointTrigger {
+    fn label(self) -> &'static str {
+        match self {
+            Self::TaskStart => "task_start",
+            Self::PostEdit => "post_edit",
+            Self::ToolFailure => "tool_failure",
+        }
+    }
+}
+
 impl PendingRecommendationQueue {
     pub fn enqueue(
         &mut self,
@@ -123,6 +140,21 @@ impl PendingRecommendationQueue {
         config: &RecommenderConfig,
         repository: Option<&SqliteTrajectoryRepository>,
     ) -> Option<RuntimeRecommendationContext> {
+        self.render_for_next_request_with_host_guidance(
+            session_id, turn_id, turn_index, tool_index, config, repository, None,
+        )
+    }
+
+    pub fn render_for_next_request_with_host_guidance(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        turn_index: u64,
+        tool_index: u64,
+        config: &RecommenderConfig,
+        repository: Option<&SqliteTrajectoryRepository>,
+        host_guidance: Option<&str>,
+    ) -> Option<RuntimeRecommendationContext> {
         if !config.enabled {
             return None;
         }
@@ -144,12 +176,22 @@ impl PendingRecommendationQueue {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         selected.truncate(config.max_recommendations);
-        if selected.is_empty() {
-            return None;
-        }
-
-        let rendered =
-            render_repository_recommendations(selected.iter().map(|record| &**record), config)?;
+        let rendered = if selected.is_empty() {
+            None
+        } else {
+            render_repository_recommendations(selected.iter().map(|record| &**record), config)
+        };
+        let context_text = match (
+            host_guidance.filter(|text| !text.trim().is_empty()),
+            &rendered,
+        ) {
+            (Some(guidance), Some(recommendations)) => {
+                format!("{guidance}\n\n{}", recommendations.text)
+            }
+            (Some(guidance), None) => guidance.to_string(),
+            (None, Some(recommendations)) => recommendations.text.clone(),
+            (None, None) => return None,
+        };
         let is_duplicate_in_current_turn = repository
             .and_then(|repo| {
                 repo.last_recommendation_injection_snapshot(session_id)
@@ -157,7 +199,7 @@ impl PendingRecommendationQueue {
                     .flatten()
             })
             .is_some_and(|(last_turn_id, last_context)| {
-                last_turn_id == turn_id && last_context == rendered.text
+                last_turn_id == turn_id && last_context == context_text
             });
         if is_duplicate_in_current_turn {
             for record in selected {
@@ -168,7 +210,10 @@ impl PendingRecommendationQueue {
             }
             return None;
         }
-        let exposed_ids = rendered.recommendation_ids.clone();
+        let exposed_ids = rendered
+            .as_ref()
+            .map(|context| context.recommendation_ids.clone())
+            .unwrap_or_default();
         for record in selected
             .iter_mut()
             .filter(|record| exposed_ids.iter().any(|id| id == &record.id))
@@ -178,10 +223,10 @@ impl PendingRecommendationQueue {
             record.exposed_turn_index = Some(turn_index);
             persist(repository, record);
         }
-        for recommendation_id in exposed_ids {
+        for recommendation_id in &exposed_ids {
             record_feedback(
                 repository,
-                &recommendation_id,
+                recommendation_id,
                 session_id,
                 turn_id,
                 RecommendationFeedbackKind::Exposed,
@@ -192,12 +237,12 @@ impl PendingRecommendationQueue {
             repository,
             session_id,
             turn_id,
-            rendered.text.clone(),
-            rendered.recommendation_ids,
+            context_text.clone(),
+            exposed_ids,
         );
         Some(RuntimeRecommendationContext {
             injection_id,
-            text: rendered.text,
+            text: context_text,
         })
     }
 
@@ -237,17 +282,6 @@ impl PendingRecommendationQueue {
                 }
                 TrajectoryKind::TestEntity
                     if record.recommendation.suggested_action == SuggestedAction::RunTest =>
-                {
-                    Some(RecommendationFeedbackKind::ValidatedAfterRecommendation)
-                }
-                TrajectoryKind::CogQuery
-                    if record.recommendation.suggested_action
-                        == SuggestedAction::ConsultCogNext
-                        && event
-                            .payload
-                            .get("action")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("next") =>
                 {
                     Some(RecommendationFeedbackKind::ValidatedAfterRecommendation)
                 }
@@ -323,6 +357,8 @@ pub struct RuntimeRecommendationLoop {
     config: RecommenderConfig,
     tool_index: u64,
     turns: HashMap<String, u64>,
+    workflow_initialized_sessions: HashSet<String>,
+    pending_workflow_checkpoints: HashMap<String, WorkflowCheckpointTrigger>,
     pre_tool_cog_snapshots: HashMap<String, CogSnapshot>,
     workspace: PathBuf,
 }
@@ -350,6 +386,8 @@ impl RuntimeRecommendationLoop {
             config,
             tool_index: 0,
             turns: HashMap::new(),
+            workflow_initialized_sessions: HashSet::new(),
+            pending_workflow_checkpoints: HashMap::new(),
             pre_tool_cog_snapshots: HashMap::new(),
             workspace: workspace.to_path_buf(),
         }
@@ -402,6 +440,9 @@ impl RuntimeRecommendationLoop {
             output_summary,
             status,
         );
+        if status == ToolEventStatus::Error && tool_name != "cog" {
+            self.schedule_workflow_checkpoint(session_id, WorkflowCheckpointTrigger::ToolFailure);
+        }
         let events = self
             .collector
             .recent_trajectory_events(16)
@@ -422,6 +463,7 @@ impl RuntimeRecommendationLoop {
                     before_sync.as_ref(),
                     after_sync.as_ref(),
                 );
+                self.schedule_workflow_checkpoint(session_id, WorkflowCheckpointTrigger::PostEdit);
             }
             let resolved = resolve_event_entity(event, &self.adapter);
             for edge in self
@@ -453,9 +495,6 @@ impl RuntimeRecommendationLoop {
                 &self.resolved_graph,
                 self.resolved_recent_events.clone(),
             );
-            if let Some(workflow) = workflow_consultation(&resolved, status) {
-                recommendations.push(workflow);
-            }
             recommendations.extend(change_recommendations);
             recommendations = dedupe_recommendations(recommendations);
             if recommendations.is_empty() && !summary_fallback_used {
@@ -605,14 +644,52 @@ impl RuntimeRecommendationLoop {
     ) -> Option<RuntimeRecommendationContext> {
         self.reload_config();
         let turn_index = self.turn_index(turn_id);
-        self.queue.render_for_next_request(
+        let host_guidance = self.take_workflow_guidance(session_id);
+        self.queue.render_for_next_request_with_host_guidance(
             session_id,
             turn_id,
             turn_index,
             self.tool_index,
             &self.config,
             self.repository.as_ref(),
+            host_guidance.as_deref(),
         )
+    }
+
+    fn schedule_workflow_checkpoint(
+        &mut self,
+        session_id: &str,
+        trigger: WorkflowCheckpointTrigger,
+    ) {
+        let replace = match self.pending_workflow_checkpoints.get(session_id) {
+            None => true,
+            Some(WorkflowCheckpointTrigger::TaskStart) => true,
+            Some(WorkflowCheckpointTrigger::PostEdit) => {
+                trigger == WorkflowCheckpointTrigger::ToolFailure
+            }
+            Some(WorkflowCheckpointTrigger::ToolFailure) => false,
+        };
+        if replace {
+            self.pending_workflow_checkpoints
+                .insert(session_id.to_string(), trigger);
+        }
+    }
+
+    fn take_workflow_guidance(&mut self, session_id: &str) -> Option<String> {
+        let trigger = self
+            .pending_workflow_checkpoints
+            .remove(session_id)
+            .or_else(|| {
+                self.workflow_initialized_sessions
+                    .insert(session_id.to_string())
+                    .then_some(WorkflowCheckpointTrigger::TaskStart)
+            })?;
+        self.workflow_initialized_sessions
+            .insert(session_id.to_string());
+        self.adapter
+            .workflow_next_report()
+            .ok()
+            .map(|report| render_workflow_guidance(trigger, &report))
     }
 
     pub fn record_injection_context_excerpt(
@@ -724,9 +801,6 @@ fn dedupe_recommendations(recommendations: Vec<Recommendation>) -> Vec<Recommend
 }
 
 fn recommendation_has_injectable_entity(recommendation: &Recommendation) -> bool {
-    if recommendation.suggested_action == SuggestedAction::ConsultCogNext {
-        return recommendation.entity.qualified_name == "cog::workflow";
-    }
     let name = recommendation.entity.qualified_name.trim();
     matches!(
         recommendation.entity.kind,
@@ -739,43 +813,70 @@ fn recommendation_has_injectable_entity(recommendation: &Recommendation) -> bool
         && !name.starts_with("error:")
 }
 
-/// The recommender observes behavior boundaries, but COG alone owns the workflow
-/// phase. This recommendation asks the Agent to consult `cog next`; it never
-/// participates in entity-graph extraction or rendering.
-fn workflow_consultation(
-    event: &TrajectoryEvent,
-    status: ToolEventStatus,
-) -> Option<Recommendation> {
-    if matches!(
-        event.kind,
-        TrajectoryKind::CogQuery | TrajectoryKind::CogWrite
-    ) {
-        return None;
+fn render_workflow_guidance(
+    trigger: WorkflowCheckpointTrigger,
+    report: &serde_json::Value,
+) -> String {
+    let status = report
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let phase = report
+        .get("phase")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let mut text = format!(
+        "<cog_workflow_guidance source=\"host_auto_cog_next\" trigger=\"{}\">\nstatus: {}\nphase: {}\nsuggestions:\n",
+        trigger.label(),
+        escape_host_text(status),
+        escape_host_text(phase),
+    );
+    let mut count = 0usize;
+    for suggestion in report
+        .get("suggestions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(4)
+    {
+        let kind = suggestion
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("next");
+        let description = suggestion
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("COG supplied no description");
+        let command = suggestion
+            .get("next_command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("no command");
+        text.push_str(&format!(
+            "- [{}] {} | COG suggestion: {}\n",
+            escape_host_text(kind),
+            escape_host_text(description),
+            escape_host_text(command)
+        ));
+        count += 1;
     }
-    let reason = match (event.kind, status) {
-        (TrajectoryKind::EditEntity, ToolEventStatus::Success) => {
-            "code changed and COG synchronization completed; ask COG for the reconciliation step"
-        }
-        (TrajectoryKind::ReadEntity | TrajectoryKind::SearchEntity, ToolEventStatus::Success) => {
-            "a new observable work turn needs COG workflow guidance"
-        }
-        (TrajectoryKind::TestEntity, ToolEventStatus::Error) => {
-            "a test failed; ask COG for the next debugging workflow action"
-        }
-        (_, ToolEventStatus::Error) => {
-            "a tool failed; ask COG which workflow action should recover context"
-        }
-        _ => return None,
-    };
-    let entity = EntityRef::new("cog::workflow").with_confidence(1.0);
-    Some(Recommendation {
-        entity: entity.clone(),
-        score: 0.98,
-        evidence: vec![Evidence::new(EvidenceSource::Rule, entity, 1.0, reason)],
-        suggested_action: SuggestedAction::ConsultCogNext,
-        tool_path: vec!["cog(action=next)".into()],
-        display_text: "Consult COG workflow state with cog next".into(),
-    })
+    if count == 0 {
+        text.push_str("- No explicit COG suggestion was returned.\n");
+    }
+    if let Some(warning) = report
+        .get("stagnation_warning")
+        .and_then(serde_json::Value::as_str)
+    {
+        text.push_str(&format!("warning: {}\n", escape_host_text(warning)));
+    }
+    text.push_str("</cog_workflow_guidance>");
+    text
+}
+
+fn escape_host_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn recommendation_materially_changed(previous: &Recommendation, next: &Recommendation) -> bool {
@@ -1486,48 +1587,34 @@ mod tests {
     }
 
     #[test]
-    fn workflow_consultation_is_injectable_and_completes_after_cog_next() {
-        let trigger = TrajectoryEvent {
-            id: "edit".into(),
-            raw_event_id: "raw-edit".into(),
-            session_id: "session".into(),
-            kind: TrajectoryKind::EditEntity,
-            entity_ref: Some(EntityRef::new("src::main")),
-            file_path: Some("src/main.rs".into()),
-            line_range: None,
-            payload: json!({"path": "src/main.rs"}),
-            confidence: 1.0,
-        };
-        let recommendation = workflow_consultation(&trigger, ToolEventStatus::Success)
-            .expect("edit should consult COG workflow");
-        assert_eq!(recommendation.entity.qualified_name, "cog::workflow");
-        assert_eq!(recommendation.tool_path, vec!["cog(action=next)"]);
-
-        let mut queue = PendingRecommendationQueue::default();
-        queue.enqueue("session", "turn", 0, 1, "edit", vec![recommendation], None);
-        let context = queue
-            .render_for_next_request("session", "turn", 0, 1, &RecommenderConfig::default(), None)
-            .expect("workflow consultation should be injected");
-        assert!(context.text.contains("action: consult_cog_next"));
-        assert!(context.text.contains("cog(action=next)"));
-
-        queue.observe(
-            &TrajectoryEvent {
-                id: "next".into(),
-                raw_event_id: "raw-next".into(),
-                session_id: "session".into(),
-                kind: TrajectoryKind::CogQuery,
-                entity_ref: None,
-                file_path: None,
-                line_range: None,
-                payload: json!({"action": "next"}),
-                confidence: 1.0,
-            },
-            "turn",
-            0,
-            2,
-            None,
+    fn host_workflow_guidance_injects_without_creating_a_recommendation() {
+        let guidance = render_workflow_guidance(
+            WorkflowCheckpointTrigger::PostEdit,
+            &json!({
+                "status": "ready",
+                "phase": "post_change",
+                "suggestions": [{
+                    "kind": "model",
+                    "description": "Record corrections for changed code.",
+                    "next_command": "cog assert src::main ..."
+                }]
+            }),
         );
-        assert_eq!(queue.records()[0].status, RecommendationStatus::Completed);
+        let mut queue = PendingRecommendationQueue::default();
+        let context = queue
+            .render_for_next_request_with_host_guidance(
+                "session",
+                "turn",
+                0,
+                1,
+                &RecommenderConfig::default(),
+                None,
+                Some(&guidance),
+            )
+            .expect("host guidance should be injected without entity recommendations");
+        assert!(context.text.contains("<cog_workflow_guidance"));
+        assert!(context.text.contains("trigger=\"post_edit\""));
+        assert!(context.text.contains("cog assert src::main"));
+        assert!(queue.records().is_empty());
     }
 }

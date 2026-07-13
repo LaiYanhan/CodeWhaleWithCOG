@@ -1059,9 +1059,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function scoreRecommendation(record) {
-      if (record.suggested_action === 'consult_cog_next') {
-        return Math.max(0.98, Number(record.server_score || 0));
-      }
       const parts = record.score_parts || {};
       const positive =
         weight('cog_graph') * part(parts, 'cog_graph') +

@@ -37,6 +37,12 @@ impl CliCogAdapter {
         self
     }
 
+    /// Run COG's workflow state machine for a host-owned checkpoint. This is
+    /// deliberately separate from graph evidence used by entity ranking.
+    pub fn workflow_next_report(&self) -> Result<Value, String> {
+        self.run_cog(&["next"])
+    }
+
     fn run_cog(&self, args: &[&str]) -> Result<Value, String> {
         let output = Command::new(&self.cog_binary)
             .current_dir(&self.workspace)
