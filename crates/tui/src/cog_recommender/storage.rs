@@ -355,6 +355,22 @@ impl SqliteTrajectoryRepository {
         Ok(())
     }
 
+    pub fn last_recommendation_injection_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT turn_id, context_text FROM recommendation_injections
+                 WHERE session_id = ?1
+                 ORDER BY created_at DESC LIMIT 1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .context("failed to load the latest recommendation injection context")
+    }
+
     pub fn update_recommendation_injection_context_excerpt(
         &self,
         injection_id: &str,

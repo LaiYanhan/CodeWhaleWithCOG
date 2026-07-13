@@ -1,5 +1,7 @@
 use super::config::RecommenderConfig;
-use super::types::{EvidenceSource, Recommendation, StoredRecommendation, SuggestedAction};
+use super::types::{
+    EntityKind, EvidenceSource, Recommendation, StoredRecommendation, SuggestedAction,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedRecommendationContext {
@@ -56,10 +58,15 @@ Attention entities:\n";
             .unwrap_or("related repository evidence");
         let reason = escape_text(&truncate_chars(reason, config.max_reason_chars));
         let entity = escape_text(&recommendation.entity.qualified_name);
+        let target_kind = if recommendation.entity.kind == EntityKind::File {
+            "file_fallback"
+        } else {
+            "cog_entity"
+        };
         let action = action_label(recommendation.suggested_action);
         let evidence = evidence_sources(&recommendation.evidence);
         let line = format!(
-            "{index}. entity: `{entity}` | action: {action} | score: {:.2} | evidence: {evidence} | why: {reason}\n",
+            "{index}. entity: `{entity}` | target_kind: {target_kind} | action: {action} | score: {:.2} | evidence: {evidence} | why: {reason}\n",
             recommendation.score
         );
         text.push_str(&line);

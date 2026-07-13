@@ -12,6 +12,7 @@ use super::collector::RawEventCollector;
 use super::config::RecommenderConfig;
 use super::feedback::render_repository_recommendations;
 use super::graph::{TrajectoryGraph, TrajectoryGraphUpdater};
+use super::recommendation_context::entity_key;
 use super::recommendation_summary::RecommendationSummaryStore;
 use super::recommender::Recommender;
 use super::resolver::resolve_event_entity;
@@ -52,13 +53,25 @@ impl PendingRecommendationQueue {
         repository: Option<&SqliteTrajectoryRepository>,
     ) {
         let now = Utc::now();
-        for recommendation in dedupe_recommendations(recommendations) {
+        let candidates = dedupe_recommendations(recommendations)
+            .into_iter()
+            .filter(recommendation_has_injectable_entity)
+            .collect::<Vec<_>>();
+        let has_cog_entity = candidates
+            .iter()
+            .any(|recommendation| recommendation.entity.kind != EntityKind::File);
+        for recommendation in candidates.into_iter().filter(|recommendation| {
+            !has_cog_entity || recommendation.entity.kind != EntityKind::File
+        }) {
             let existing = self.records.iter_mut().find(|record| {
                 record.session_id == session_id
-                    && record.recommendation.entity.qualified_name
-                        == recommendation.entity.qualified_name
+                    && entity_key(&record.recommendation.entity)
+                        == entity_key(&recommendation.entity)
                     && record.recommendation.suggested_action == recommendation.suggested_action
-                    && record.status == RecommendationStatus::Pending
+                    && matches!(
+                        record.status,
+                        RecommendationStatus::Pending | RecommendationStatus::Exposed
+                    )
             });
             let record = if let Some(record) = existing {
                 if !record
@@ -68,9 +81,16 @@ impl PendingRecommendationQueue {
                 {
                     record.trigger_event_ids.push(trigger_event_id.to_string());
                 }
+                let materially_changed =
+                    recommendation_materially_changed(&record.recommendation, &recommendation);
                 record.recommendation = recommendation;
                 record.last_triggered_at = now;
                 record.expires_at = now + Duration::minutes(FEEDBACK_MINUTES);
+                if materially_changed && record.status == RecommendationStatus::Exposed {
+                    record.status = RecommendationStatus::Pending;
+                    record.exposed_at = None;
+                    record.exposed_turn_index = None;
+                }
                 record
             } else {
                 self.records.push(StoredRecommendation {
@@ -130,6 +150,24 @@ impl PendingRecommendationQueue {
 
         let rendered =
             render_repository_recommendations(selected.iter().map(|record| &**record), config)?;
+        let is_duplicate_in_current_turn = repository
+            .and_then(|repo| {
+                repo.last_recommendation_injection_snapshot(session_id)
+                    .ok()
+                    .flatten()
+            })
+            .is_some_and(|(last_turn_id, last_context)| {
+                last_turn_id == turn_id && last_context == rendered.text
+            });
+        if is_duplicate_in_current_turn {
+            for record in selected {
+                record.status = RecommendationStatus::Exposed;
+                record.exposed_at = Some(Utc::now());
+                record.exposed_turn_index = Some(turn_index);
+                persist(repository, record);
+            }
+            return None;
+        }
         let exposed_ids = rendered.recommendation_ids.clone();
         for record in selected
             .iter_mut()
@@ -671,6 +709,48 @@ fn dedupe_recommendations(recommendations: Vec<Recommendation>) -> Vec<Recommend
     recommendations
 }
 
+fn recommendation_has_injectable_entity(recommendation: &Recommendation) -> bool {
+    let name = recommendation.entity.qualified_name.trim();
+    matches!(
+        recommendation.entity.kind,
+        EntityKind::File
+            | EntityKind::Module
+            | EntityKind::Function
+            | EntityKind::Type
+            | EntityKind::Method
+    ) && !name.is_empty()
+        && !name.starts_with("error:")
+}
+
+fn recommendation_materially_changed(previous: &Recommendation, next: &Recommendation) -> bool {
+    if (previous.score - next.score).abs() >= 0.05 {
+        return true;
+    }
+    let previous_evidence = previous
+        .evidence
+        .iter()
+        .map(|evidence| {
+            (
+                evidence.source,
+                evidence.target.qualified_name.as_str(),
+                evidence.reason.as_str(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let next_evidence = next
+        .evidence
+        .iter()
+        .map(|evidence| {
+            (
+                evidence.source,
+                evidence.target.qualified_name.as_str(),
+                evidence.reason.as_str(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    previous_evidence != next_evidence
+}
+
 fn persist(repository: Option<&SqliteTrajectoryRepository>, recommendation: &StoredRecommendation) {
     if let Some(repository) = repository {
         let _ = repository.upsert_recommendation(recommendation);
@@ -848,7 +928,9 @@ mod tests {
     use tempfile::tempdir;
 
     fn recommendation(name: &str, score: f64) -> Recommendation {
-        let entity = EntityRef::new(name).with_confidence(0.9);
+        let entity = EntityRef::new(name)
+            .with_kind(EntityKind::Function)
+            .with_confidence(0.9);
         Recommendation {
             entity: entity.clone(),
             score,
@@ -915,6 +997,70 @@ mod tests {
     }
 
     #[test]
+    fn queue_injects_file_entities_and_does_not_suppress_a_later_turn() {
+        let repo = SqliteTrajectoryRepository::open_in_memory().expect("repo");
+        let mut file_recommendation = recommendation("static/index.html", 0.6);
+        file_recommendation.entity = EntityRef::new("static/index.html")
+            .with_kind(EntityKind::File)
+            .with_file_path("static/index.html")
+            .with_confidence(0.9);
+
+        let mut first_queue = PendingRecommendationQueue::default();
+        first_queue.enqueue(
+            "session",
+            "turn-1",
+            0,
+            1,
+            "event-1",
+            vec![file_recommendation.clone()],
+            Some(&repo),
+        );
+        let first_context = first_queue
+            .render_for_next_request(
+                "session",
+                "turn-1",
+                0,
+                1,
+                &RecommenderConfig::default(),
+                Some(&repo),
+            )
+            .expect("first context");
+        assert!(first_context.text.contains("target_kind: file_fallback"));
+
+        let mut later_queue = PendingRecommendationQueue::default();
+        later_queue.enqueue(
+            "session",
+            "turn-2",
+            1,
+            2,
+            "event-2",
+            vec![file_recommendation],
+            Some(&repo),
+        );
+        assert!(
+            later_queue
+                .render_for_next_request(
+                    "session",
+                    "turn-2",
+                    1,
+                    2,
+                    &RecommenderConfig::default(),
+                    Some(&repo),
+                )
+                .is_some()
+        );
+        assert_eq!(
+            repo.list_recent_recommendation_injections(
+                crate::cog_recommender::visualization::VisualizationScope::Session,
+                10,
+            )
+            .expect("injections")
+            .len(),
+            2
+        );
+    }
+
+    #[test]
     fn queue_allows_a_second_injection_after_a_later_edit_in_same_turn() {
         let mut queue = PendingRecommendationQueue::default();
         let config = RecommenderConfig::default();
@@ -949,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_requeues_same_entity_after_its_prior_batch_was_exposed() {
+    fn queue_suppresses_same_entity_after_its_prior_batch_was_exposed() {
         let mut queue = PendingRecommendationQueue::default();
         let config = RecommenderConfig::default();
         queue.enqueue(
@@ -974,12 +1120,22 @@ mod tests {
             vec![recommendation("a::same", 0.9)],
             None,
         );
-        let second = queue
-            .render_for_next_request("s", "t", 0, 2, &config, None)
-            .expect("second context");
+        assert!(
+            queue
+                .render_for_next_request("s", "t", 0, 2, &config, None)
+                .is_none()
+        );
+        assert_eq!(queue.records().len(), 1);
+    }
 
-        assert_eq!(queue.records().len(), 2);
-        assert!(second.text.contains("a::same"));
+    #[test]
+    fn queue_rejects_path_like_file_recommendations() {
+        let mut queue = PendingRecommendationQueue::default();
+        let mut file = recommendation("D:\\workspace\\static\\index.html", 0.9);
+        file.entity.kind = EntityKind::File;
+        queue.enqueue("s", "t", 0, 1, "e1", vec![file], None);
+
+        assert!(queue.records().is_empty());
     }
 
     #[test]

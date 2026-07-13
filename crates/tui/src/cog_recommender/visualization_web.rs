@@ -1086,6 +1086,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const reasons = evidence.slice(0, 3).map(item =>
         `<div class="evidence-reason">${escapeHtml(item.reason || '')}</div>`
       ).join('');
+      const occurrenceCount = Number(record.occurrence_count || 1);
+      const status = record.active_status ? `active ${record.active_status}` : '';
+      const lastTriggered = record.last_triggered_at ? new Date(record.last_triggered_at).toLocaleString() : '';
+      const lifecycle = occurrenceCount > 1 || status || lastTriggered
+        ? `<div class="evidence-reason">${occurrenceCount} persisted occurrence${occurrenceCount === 1 ? '' : 's'}${status ? ` · ${escapeHtml(status)}` : ''}${lastTriggered ? ` · latest ${escapeHtml(lastTriggered)}` : ''}</div>`
+        : '';
       return `
         <article class="recommendation-card">
           <div class="rank-badge">#${rank}</div>
@@ -1094,8 +1100,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="recommendation-subtitle">${escapeHtml(fullName)}</div>
             ${toolPath ? `<div class="evidence-reason">Suggested tools: ${toolPath}</div>` : ''}
             <div class="recommendation-action">${escapeHtml(actionLabel(record.suggested_action))} · ${escapeHtml(entity.kind || 'unknown')}</div>
-            <div class="evidence-tags">${tags}</div>
-            ${reasons}
+             <div class="evidence-tags">${tags}</div>
+             ${reasons}
+             ${lifecycle}
           </div>
           <div class="score-stack">
             <div class="score-main">${formatScore(record.client_score)}</div>

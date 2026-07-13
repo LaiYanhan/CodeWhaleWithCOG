@@ -61,6 +61,9 @@ pub struct RecommendationSummaryRecord {
     pub server_score: f64,
     pub score_parts: RecommendationScoreParts,
     pub evidence: Vec<RecommendationEvidenceSummary>,
+    pub occurrence_count: usize,
+    pub active_status: Option<super::types::RecommendationStatus>,
+    pub last_triggered_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -312,6 +315,9 @@ fn records_from_edges(
                 server_score,
                 score_parts,
                 evidence,
+                occurrence_count: 1,
+                active_status: None,
+                last_triggered_at: None,
             })
         })
         .collect()
@@ -321,29 +327,105 @@ fn records_from_stored_recommendations(
     records: Vec<StoredRecommendation>,
     weights: RecommendationWeights,
 ) -> Vec<RecommendationSummaryRecord> {
-    records
-        .into_iter()
-        .map(|stored| {
-            let evidence = stored
-                .recommendation
-                .evidence
-                .into_iter()
-                .map(|item| RecommendationEvidenceSummary {
-                    source: item.source,
-                    weight: item.weight,
-                    reason: item.reason,
-                    payload: item.payload,
-                })
-                .collect::<Vec<_>>();
-            let score_parts = score_parts(&stored.recommendation.entity, &evidence);
-            RecommendationSummaryRecord {
-                entity: stored.recommendation.entity,
-                suggested_action: stored.recommendation.suggested_action,
-                tool_path: stored.recommendation.tool_path,
-                server_score: score_from_parts(score_parts, weights),
-                score_parts,
+    let mut grouped: HashMap<
+        (String, SuggestedAction),
+        (
+            EntityRef,
+            Vec<RecommendationEvidenceSummary>,
+            usize,
+            SuggestedAction,
+            super::types::RecommendationStatus,
+            DateTime<Utc>,
+        ),
+    > = HashMap::new();
+    for stored in records {
+        let entity = stored.recommendation.entity.clone();
+        if !is_recommendable_entity(&entity) {
+            continue;
+        }
+        let key = (
+            entity
+                .cog_entity_id
+                .clone()
+                .unwrap_or_else(|| entity.qualified_name.clone()),
+            stored.recommendation.suggested_action,
+        );
+        let evidence = stored
+            .recommendation
+            .evidence
+            .into_iter()
+            .map(|item| RecommendationEvidenceSummary {
+                source: item.source,
+                weight: item.weight,
+                reason: item.reason,
+                payload: item.payload,
+            })
+            .collect::<Vec<_>>();
+        grouped
+            .entry(key)
+            .and_modify(
+                |(_, existing_evidence, count, _, status, last_triggered_at)| {
+                    existing_evidence.extend(evidence.clone());
+                    *count += 1;
+                    if stored.last_triggered_at > *last_triggered_at {
+                        *status = stored.status;
+                        *last_triggered_at = stored.last_triggered_at;
+                    }
+                },
+            )
+            .or_insert((
+                entity,
                 evidence,
+                1,
+                stored.recommendation.suggested_action,
+                stored.status,
+                stored.last_triggered_at,
+            ));
+    }
+    grouped
+        .into_values()
+        .map(
+            |(
+                entity,
+                evidence,
+                occurrence_count,
+                suggested_action,
+                active_status,
+                last_triggered_at,
+            )| {
+                let evidence = compact_summary_evidence(evidence);
+                let score_parts = score_parts(&entity, &evidence);
+                RecommendationSummaryRecord {
+                    entity,
+                    suggested_action,
+                    tool_path: summary_tool_path(suggested_action, &evidence),
+                    server_score: score_from_parts(score_parts, weights),
+                    score_parts,
+                    evidence,
+                    occurrence_count,
+                    active_status: Some(active_status),
+                    last_triggered_at: Some(last_triggered_at),
+                }
+            },
+        )
+        .collect()
+}
+
+fn compact_summary_evidence(
+    evidence: Vec<RecommendationEvidenceSummary>,
+) -> Vec<RecommendationEvidenceSummary> {
+    let mut seen = HashSet::new();
+    let mut per_source = HashMap::new();
+    evidence
+        .into_iter()
+        .filter(|item| {
+            let key = (item.source, item.reason.clone());
+            if !seen.insert(key) {
+                return false;
             }
+            let count = per_source.entry(item.source).or_insert(0usize);
+            *count += 1;
+            *count <= 3
         })
         .collect()
 }
@@ -495,8 +577,13 @@ fn projected_reason(edge: &EdgeStats, target: &EntityRef) -> String {
 fn is_recommendable_entity(entity: &EntityRef) -> bool {
     matches!(
         entity.kind,
-        EntityKind::Function | EntityKind::Method | EntityKind::Type | EntityKind::Module
-    ) && !path_like_value(&entity.qualified_name).is_some()
+        EntityKind::File
+            | EntityKind::Function
+            | EntityKind::Method
+            | EntityKind::Type
+            | EntityKind::Module
+    ) && !entity.qualified_name.trim().is_empty()
+        && !entity.qualified_name.starts_with("error:")
 }
 
 fn path_like_value(value: &str) -> Option<&str> {
